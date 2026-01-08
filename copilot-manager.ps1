@@ -3,21 +3,20 @@
 .SYNOPSIS
     GitHub Copilot API 独立管理工具
 .DESCRIPTION
-    可在任何位置独立运行
+    完全独立运行，可放在任何位置使用
+    工作目录为脚本所在目录
+.NOTES
+    Version: 2.1 (Standalone)
+    Author: Halo
 #>
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # 配置变量
 $script:Port = 4141
-$script:WorkDir = Join-Path $env:USERPROFILE ".copilot-api"
+$script:WorkDir = $PSScriptRoot  # 使用脚本所在目录
 $script:LogFile = Join-Path $script:WorkDir "copilot-api.log"
 $script:ServiceUrl = "http://localhost:$Port"
-
-# 确保工作目录存在
-if (-not (Test-Path $script:WorkDir)) {
-    New-Item -ItemType Directory -Path $script:WorkDir -Force | Out-Null
-}
 
 # 模型配置方案
 $script:ModelPresets = @{
@@ -280,7 +279,7 @@ function Start-CopilotService {
     Write-Title "启动 Copilot API 服务"
 
     # 检查 Node.js
-    Write-Info "[1/3] 检查 Node.js..."
+    Write-Info "[1/4] 检查 Node.js..."
     try {
         $nodeVersion = node --version 2>$null
         if ($LASTEXITCODE -eq 0) {
@@ -292,11 +291,24 @@ function Start-CopilotService {
     }
     catch {
         Write-Error "未找到 Node.js，请先安装 Node.js"
+        Write-Host ""
+        Write-Host "下载地址: https://nodejs.org/" -ForegroundColor Cyan
         return
     }
 
+    # 检查并安装 copilot-api（避免交互式提示）
+    Write-Info "[2/4] 检查 copilot-api 包..."
+    try {
+        # 使用 -y 参数自动确认安装
+        $null = cmd /c "npx -y copilot-api@latest --version 2>&1"
+        Write-Success "copilot-api 已就绪"
+    }
+    catch {
+        Write-Warning "无法验证 copilot-api 状态，将尝试继续启动"
+    }
+
     # 检查是否已有实例在运行
-    Write-Info "[2/3] 检查服务状态..."
+    Write-Info "[3/4] 检查服务状态..."
     if (Test-PortInUse -Port $script:Port) {
         Write-Warning "端口 $script:Port 已被占用，服务可能已在运行"
         Write-Host ""
@@ -313,16 +325,15 @@ function Start-CopilotService {
     Write-Success "端口检查完成"
 
     # 启动服务（后台运行）
-    Write-Info "[3/3] 启动 Copilot API 服务器..."
+    Write-Info "[4/4] 启动 Copilot API 服务器..."
     Write-Host ""
 
     try {
-        # 使用 VBScript 后台启动服务
-        $logFile = Join-Path $script:WorkDir "copilot-api.log"
+        # 使用 VBScript 后台启动服务，使用 -y 避免交互提示
         $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
-WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
+WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
 "@
 
         $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
@@ -337,8 +348,8 @@ WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-
 
         Write-Info "等待服务启动..."
 
-        # 多次尝试检测端口（最多 10 秒）
-        $maxAttempts = 10
+        # 多次尝试检测端口（最多 15 秒，首次启动可能需要下载）
+        $maxAttempts = 15
         $attempt = 0
         $serviceStarted = $false
 
@@ -349,9 +360,13 @@ WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-
                 break
             }
             $attempt++
+            if ($attempt % 3 -eq 0) {
+                Write-Host "." -NoNewline
+            }
         }
 
         if ($serviceStarted) {
+            Write-Host ""
             Write-Host ""
             Write-Title "✓ 服务启动成功！"
             Write-Host "  服务地址: $script:ServiceUrl" -ForegroundColor Green
@@ -359,9 +374,10 @@ WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-
             Write-Host "  日志文件: $script:LogFile" -ForegroundColor Gray
             Write-Host "  监控面板: https://ericc-ch.github.io/copilot-api?endpoint=$script:ServiceUrl/usage" -ForegroundColor Cyan
             Write-Host ""
-            Write-Info "提示: 服务已在后台运行"
+            Write-Info "提示: 服务已在后台运行，可以关闭此窗口"
         }
         else {
+            Write-Host ""
             Write-Warning "无法确认服务状态，请查看日志文件或手动检查"
             Write-Host "  日志文件: $script:LogFile" -ForegroundColor Gray
         }
@@ -625,11 +641,11 @@ function Invoke-QuickStart {
     }
     else {
         try {
-            # 使用 VBScript 后台启动服务
+            # 使用 VBScript 后台启动服务，使用 -y 避免交互提示
             $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
-WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
+WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
 "@
 
             $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
@@ -642,8 +658,8 @@ WshShell.Run "cmd /c npx copilot-api@latest start --port $script:Port > copilot-
             Start-Sleep -Milliseconds 500
             Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
 
-            # 多次尝试检测端口（最多 10 秒）
-            $maxAttempts = 10
+            # 多次尝试检测端口（最多 15 秒）
+            $maxAttempts = 15
             $attempt = 0
             $serviceStarted = $false
 
