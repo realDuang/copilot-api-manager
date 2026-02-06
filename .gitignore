@@ -1,0 +1,8 @@
+# Logs
+*.log
+
+# Auto-generated watchdog script
+copilot-watchdog.ps1
+
+# Windows
+nul

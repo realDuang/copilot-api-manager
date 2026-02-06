@@ -5,8 +5,9 @@
 .DESCRIPTION
     完全独立运行，可放在任何位置使用
     工作目录为脚本所在目录
+    支持服务守护进程，自动检测故障并重启
 .NOTES
-    Version: 2.1 (Standalone)
+    Version: 3.0 (with Watchdog)
     Author: Halo
 #>
 
@@ -16,7 +17,11 @@
 $script:Port = 4141
 $script:WorkDir = $PSScriptRoot  # 使用脚本所在目录
 $script:LogFile = Join-Path $script:WorkDir "copilot-api.log"
+$script:WatchdogLogFile = Join-Path $script:WorkDir "watchdog.log"
 $script:ServiceUrl = "http://localhost:$Port"
+$script:HealthCheckInterval = 30  # Health check interval in seconds
+$script:MaxRestartAttempts = 5    # Maximum restart attempts within cooldown period
+$script:RestartCooldown = 300     # Cooldown period in seconds (5 minutes)
 
 # 模型配置方案
 $script:ModelPresets = @{
@@ -79,6 +84,18 @@ function Write-Title {
     Write-Host ""
 }
 
+function Clear-HostSafe {
+    # Only clear host if running in an interactive terminal
+    try {
+        if ($Host.UI.RawUI.WindowSize.Width -gt 0) {
+            Clear-Host
+        }
+    }
+    catch {
+        # Not in interactive terminal, skip clear
+    }
+}
+
 function Write-Success {
     param([string]$Message)
     Write-Host "[✓] $Message" -ForegroundColor Green
@@ -105,6 +122,265 @@ function Test-PortInUse {
     return $null -ne $connections
 }
 
+function Write-WatchdogLog {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    Add-Content -Path $script:WatchdogLogFile -Value $logEntry -ErrorAction SilentlyContinue
+}
+
+function Test-ServiceHealth {
+    # Check if port is in use
+    if (-not (Test-PortInUse -Port $script:Port)) {
+        return @{ Healthy = $false; Reason = "Port not listening" }
+    }
+    
+    # Check API responsiveness
+    try {
+        $response = Invoke-WebRequest -Uri "$script:ServiceUrl/v1/models" -TimeoutSec 10 -ErrorAction Stop
+        if ($response.StatusCode -eq 200) {
+            return @{ Healthy = $true; Reason = "OK" }
+        }
+        return @{ Healthy = $false; Reason = "Unexpected status code: $($response.StatusCode)" }
+    }
+    catch {
+        return @{ Healthy = $false; Reason = "API request failed: $($_.Exception.Message)" }
+    }
+}
+
+function Start-ServiceInternal {
+    # Start service without user interaction (for watchdog use)
+    try {
+        $vbsContent = "Set WshShell = CreateObject(""WScript.Shell"")" + [Environment]::NewLine
+        $vbsContent += "WshShell.CurrentDirectory = ""$script:WorkDir""" + [Environment]::NewLine
+        $vbsContent += "WshShell.Run ""cmd /c npx -y copilot-api@latest start --port $script:Port >> copilot-api.log 2>&1"", 0, False"
+        
+        $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
+        $vbsContent | Out-File -FilePath $vbsFile -Encoding ASCII
+        Start-Process -FilePath "cscript.exe" -ArgumentList "//nologo", "`"$vbsFile`"" -WindowStyle Hidden
+        Start-Sleep -Milliseconds 500
+        Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
+        
+        # Wait for service to start (max 15 seconds)
+        $maxAttempts = 15
+        $attempt = 0
+        while ($attempt -lt $maxAttempts) {
+            Start-Sleep -Seconds 1
+            if (Test-PortInUse -Port $script:Port) {
+                return $true
+            }
+            $attempt++
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
+
+function Stop-ServiceInternal {
+    # Stop service without user interaction (for watchdog use)
+    $process = Get-ServiceProcess
+    if ($null -ne $process) {
+        try {
+            Stop-Process -Id $process.Id -Force -ErrorAction Stop
+            Start-Sleep -Milliseconds 500
+            return $true
+        }
+        catch {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Start-WatchdogInternal {
+    # Stop existing watchdog if any
+    Stop-WatchdogInternal
+    Start-Sleep -Milliseconds 500
+    
+    # Create the watchdog script content
+    $watchdogScript = @"
+# Copilot API Watchdog Script
+# Auto-generated - do not modify directly
+
+`$ErrorActionPreference = "Continue"
+`$Port = $script:Port
+`$WorkDir = "$($script:WorkDir -replace '\\', '\\')"
+`$LogFile = "$($script:WatchdogLogFile -replace '\\', '\\')"
+`$ServiceUrl = "$script:ServiceUrl"
+`$HealthCheckInterval = 10
+`$MaxRestartAttempts = $script:MaxRestartAttempts
+`$RestartCooldown = $script:RestartCooldown
+`$HeartbeatInterval = 30
+
+function Write-Log {
+    param([string]`$Message, [string]`$Level = "INFO")
+    try {
+        `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path `$LogFile -Value "[`$timestamp] [`$Level] `$Message" -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+function Test-PortInUse {
+    param([int]`$Port)
+    try {
+        `$connections = Get-NetTCPConnection -LocalPort `$Port -State Listen -ErrorAction SilentlyContinue
+        return `$null -ne `$connections
+    } catch { return `$false }
+}
+
+function Test-ServiceHealth {
+    try {
+        if (-not (Test-PortInUse -Port `$Port)) {
+            return @{ Healthy = `$false; Reason = "Port not listening" }
+        }
+        `$response = Invoke-WebRequest -Uri "`$ServiceUrl/v1/models" -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+        if (`$response.StatusCode -eq 200) { return @{ Healthy = `$true; Reason = "OK" } }
+        return @{ Healthy = `$false; Reason = "Status: `$(`$response.StatusCode)" }
+    }
+    catch {
+        `$msg = `$_.Exception.Message
+        if (`$msg.Length -gt 80) { `$msg = `$msg.Substring(0, 80) }
+        return @{ Healthy = `$false; Reason = `$msg }
+    }
+}
+
+function Start-CopilotService {
+    try {
+        Write-Log "Starting service..." "INFO"
+        `$vbsContent = "Set WshShell = CreateObject(""WScript.Shell"")" + [Environment]::NewLine
+        `$vbsContent += "WshShell.CurrentDirectory = ""`$WorkDir""" + [Environment]::NewLine
+        `$vbsContent += "WshShell.Run ""cmd /c npx -y copilot-api@latest start --port `$Port >> copilot-api.log 2>&1"", 0, False"
+        
+        `$vbsFile = Join-Path `$env:TEMP "start-copilot-api.vbs"
+        `$vbsContent | Out-File -FilePath `$vbsFile -Encoding ASCII
+        Start-Process -FilePath "cscript.exe" -ArgumentList "//nologo", "```"`$vbsFile```"" -WindowStyle Hidden
+        Start-Sleep -Milliseconds 500
+        Remove-Item `$vbsFile -Force -ErrorAction SilentlyContinue
+        
+        for (`$i = 0; `$i -lt 30; `$i++) {
+            Start-Sleep -Seconds 1
+            if (Test-PortInUse -Port `$Port) { return `$true }
+        }
+        return `$false
+    }
+    catch {
+        Write-Log "Start exception: `$(`$_.Exception.Message)" "ERROR"
+        return `$false
+    }
+}
+
+function Stop-CopilotService {
+    try {
+        `$connections = Get-NetTCPConnection -LocalPort `$Port -State Listen -ErrorAction SilentlyContinue
+        if (`$connections) {
+            foreach (`$conn in `$connections) {
+                `$proc = Get-Process -Id `$conn.OwningProcess -ErrorAction SilentlyContinue
+                if (`$proc) {
+                    Get-CimInstance Win32_Process -Filter "ParentProcessId = `$(`$proc.Id)" -ErrorAction SilentlyContinue | 
+                        ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
+                    Stop-Process -Id `$proc.Id -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Start-Sleep -Milliseconds 1000
+        }
+    } catch {
+        Write-Log "Stop exception: `$(`$_.Exception.Message)" "ERROR"
+    }
+}
+
+# Main watchdog loop with exception handling
+Write-Log "Watchdog started (PID: `$PID)" "INFO"
+`$restartTimes = @()
+`$lastHeartbeat = Get-Date
+
+try {
+    while (`$true) {
+        try {
+            Start-Sleep -Seconds `$HealthCheckInterval
+            
+            if (((Get-Date) - `$lastHeartbeat).TotalSeconds -ge `$HeartbeatInterval) {
+                Write-Log "Heartbeat: alive" "DEBUG"
+                `$lastHeartbeat = Get-Date
+            }
+            
+            `$health = Test-ServiceHealth
+            
+            if (-not `$health.Healthy) {
+                Write-Log "Health failed: `$(`$health.Reason)" "WARN"
+                
+                `$now = Get-Date
+                `$restartTimes = @(`$restartTimes | Where-Object { (`$now - `$_).TotalSeconds -lt `$RestartCooldown })
+                
+                if (`$restartTimes.Count -ge `$MaxRestartAttempts) {
+                    Write-Log "Rate limit exceeded" "ERROR"
+                    continue
+                }
+                
+                Write-Log "Restarting (`$(`$restartTimes.Count + 1)/`$MaxRestartAttempts)..." "WARN"
+                Stop-CopilotService
+                Start-Sleep -Seconds 2
+                
+                if (Start-CopilotService) {
+                    Write-Log "Restarted OK" "INFO"
+                    `$restartTimes += `$now
+                } else {
+                    Write-Log "Restart failed" "ERROR"
+                }
+            }
+        }
+        catch {
+            Write-Log "Loop error: `$(`$_.Exception.Message)" "ERROR"
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+catch {
+    Write-Log "Fatal: `$(`$_.Exception.Message)" "FATAL"
+}
+finally {
+    Write-Log "Watchdog stopped" "WARN"
+}
+"@
+    
+    # Save watchdog script
+    $watchdogScriptPath = Join-Path $script:WorkDir "copilot-watchdog.ps1"
+    $watchdogScript | Out-File -FilePath $watchdogScriptPath -Encoding UTF8
+    
+    # Start watchdog in background
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "powershell.exe"
+    $startInfo.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$watchdogScriptPath`""
+    $startInfo.CreateNoWindow = $true
+    $startInfo.UseShellExecute = $false
+    
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    
+    if ($process) {
+        Write-Success "守护进程已启动 (PID: $($process.Id))"
+        return $true
+    }
+    return $false
+}
+
+function Stop-WatchdogInternal {
+    $watchdogProcesses = Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | 
+        Where-Object { $_.CommandLine -match "copilot-watchdog\.ps1" }
+    
+    if ($watchdogProcesses) {
+        foreach ($proc in $watchdogProcesses) {
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-WatchdogRunning {
+    $watchdogProcesses = Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | 
+        Where-Object { $_.CommandLine -match "copilot-watchdog\.ps1" }
+    return $null -ne $watchdogProcesses
+}
+
 function Get-ServiceProcess {
     $connections = Get-NetTCPConnection -LocalPort $script:Port -State Listen -ErrorAction SilentlyContinue
     if ($connections) {
@@ -116,7 +392,7 @@ function Get-ServiceProcess {
 function Show-ModelSelectionMenu {
     param([string]$Title = "配置全局环境变量")
 
-    Clear-Host
+    Clear-HostSafe
     Write-Title $Title
     Write-Host "请选择模型配置方案：" -ForegroundColor White
     Write-Host ""
@@ -218,7 +494,7 @@ function Set-EnvironmentVariables {
 }
 
 function Remove-EnvironmentVariables {
-    Clear-Host
+    Clear-HostSafe
     Write-Title "清除全局环境变量"
 
     Write-Host "此操作将删除以下环境变量：" -ForegroundColor White
@@ -275,7 +551,7 @@ function Remove-EnvironmentVariables {
 }
 
 function Start-CopilotService {
-    Clear-Host
+    Clear-HostSafe
     Write-Title "启动 Copilot API 服务"
 
     # 检查 Node.js
@@ -368,13 +644,21 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
         if ($serviceStarted) {
             Write-Host ""
             Write-Host ""
-            Write-Title "✓ 服务启动成功！"
+            Write-Success "服务启动成功"
+            
+            # Auto-start watchdog
+            Write-Info "启动守护进程..."
+            Start-WatchdogInternal
+            
+            Write-Host ""
+            Write-Title "✓ 启动完成！"
             Write-Host "  服务地址: $script:ServiceUrl" -ForegroundColor Green
             Write-Host "  工作目录: $script:WorkDir" -ForegroundColor Gray
             Write-Host "  日志文件: $script:LogFile" -ForegroundColor Gray
             Write-Host "  监控面板: https://ericc-ch.github.io/copilot-api?endpoint=$script:ServiceUrl/usage" -ForegroundColor Cyan
             Write-Host ""
-            Write-Info "提示: 服务已在后台运行，可以关闭此窗口"
+            Write-Info "提示: 服务和守护进程已在后台运行，可以关闭此窗口"
+            Write-Host "  守护进程会在服务异常时自动重启" -ForegroundColor Gray
         }
         else {
             Write-Host ""
@@ -393,14 +677,24 @@ function Stop-CopilotService {
     param([switch]$Silent)
 
     if (-not $Silent) {
-        Clear-Host
+        Clear-HostSafe
         Write-Title "停止 Copilot API 服务"
+    }
+
+    # Stop watchdog first
+    if (Test-WatchdogRunning) {
+        Write-Info "停止守护进程..."
+        Stop-WatchdogInternal
+        Write-Success "守护进程已停止"
     }
 
     $process = Get-ServiceProcess
     if ($null -ne $process) {
         try {
             Write-Info "找到进程 PID: $($process.Id)"
+            # Kill child processes first
+            Get-CimInstance Win32_Process -Filter "ParentProcessId = $($process.Id)" -ErrorAction SilentlyContinue | 
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
             Stop-Process -Id $process.Id -Force
             Write-Success "服务已停止"
         }
@@ -409,13 +703,17 @@ function Stop-CopilotService {
         }
     }
     else {
-        Write-Warning "未找到运行中的服务"
+        if (-not $Silent) {
+            Write-Warning "未找到运行中的服务"
+        }
     }
 
     Start-Sleep -Milliseconds 500
 
     if (-not (Test-PortInUse -Port $script:Port)) {
-        Write-Success "端口 $script:Port 已释放"
+        if (-not $Silent) {
+            Write-Success "端口 $script:Port 已释放"
+        }
     }
     else {
         Write-Warning "端口仍被占用，请手动检查"
@@ -425,7 +723,7 @@ function Stop-CopilotService {
 }
 
 function Show-ServiceStatus {
-    Clear-Host
+    Clear-HostSafe
     Write-Title "Copilot API 服务状态检查"
 
     # 检查 Node.js
@@ -505,16 +803,43 @@ function Show-ServiceStatus {
         Write-Host "[×] 未配置" -ForegroundColor Red
     }
 
+    # 守护进程状态
+    Write-Host ""
+    Write-Host "[守护进程状态]" -ForegroundColor Cyan
+    if (Test-WatchdogRunning) {
+        Write-Host "  状态:    " -NoNewline
+        Write-Host "[✓] 守护进程运行中" -ForegroundColor Green
+        
+        # Show recent watchdog log
+        if (Test-Path $script:WatchdogLogFile) {
+            $recentLogs = Get-Content $script:WatchdogLogFile -Tail 3 -ErrorAction SilentlyContinue
+            if ($recentLogs) {
+                Write-Host "  最近日志:" -ForegroundColor Gray
+                foreach ($log in $recentLogs) {
+                    Write-Host "    $log" -ForegroundColor Gray
+                }
+            }
+        }
+    }
+    else {
+        Write-Host "  状态:    " -NoNewline
+        Write-Host "[×] 守护进程未运行" -ForegroundColor Yellow
+    }
+
     # 其他信息
     Write-Host ""
     Write-Host "[其他信息]" -ForegroundColor Cyan
     Write-Host "  工作目录: $script:WorkDir" -ForegroundColor Gray
     if (Test-Path $script:LogFile) {
-        Write-Host "  日志文件: " -NoNewline
+        Write-Host "  服务日志: " -NoNewline
         Write-Host "[✓] $script:LogFile" -ForegroundColor Green
     }
     else {
-        Write-Host "  日志文件: [-] 无日志文件"
+        Write-Host "  服务日志: [-] 无日志文件"
+    }
+    if (Test-Path $script:WatchdogLogFile) {
+        Write-Host "  守护日志: " -NoNewline
+        Write-Host "[✓] $script:WatchdogLogFile" -ForegroundColor Green
     }
     Write-Host "  监控面板: https://ericc-ch.github.io/copilot-api?endpoint=$script:ServiceUrl/usage" -ForegroundColor Cyan
 
@@ -583,12 +908,12 @@ function Invoke-QuickStart {
         return
     }
 
-    Clear-Host
+    Clear-HostSafe
     Write-Title "一键配置并启动"
 
     Write-Host "此操作将：" -ForegroundColor White
     Write-Host "  1. 配置全局环境变量 (Sonnet: $sonnetModel, Haiku: $haikuModel)"
-    Write-Host "  2. 启动 Copilot API 服务"
+    Write-Host "  2. 启动服务和守护进程"
     Write-Host ""
 
     $confirm = Read-Host "确认执行? (Y/N)"
@@ -635,13 +960,18 @@ function Invoke-QuickStart {
         return
     }
 
-    # 检查端口
+    # 检查端口并启动服务
     if (Test-PortInUse -Port $script:Port) {
-        Write-Info "服务已在运行，跳过启动"
+        Write-Info "服务已在运行"
+        # Ensure watchdog is running
+        if (-not (Test-WatchdogRunning)) {
+            Write-Info "启动守护进程..."
+            Start-WatchdogInternal
+        }
     }
     else {
         try {
-            # 使用 VBScript 后台启动服务，使用 -y 避免交互提示
+            # 使用 VBScript 后台启动服务
             $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
@@ -650,15 +980,11 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
 
             $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
             $vbsScript | Out-File -FilePath $vbsFile -Encoding ASCII
-
-            # 不使用 -Wait，让 VBS 异步执行
             Start-Process -FilePath "cscript.exe" -ArgumentList "//nologo", "`"$vbsFile`"" -WindowStyle Hidden
-
-            # 等待一小段时间让 VBS 启动
             Start-Sleep -Milliseconds 500
             Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
 
-            # 多次尝试检测端口（最多 15 秒）
+            # 等待服务启动
             $maxAttempts = 15
             $attempt = 0
             $serviceStarted = $false
@@ -674,6 +1000,9 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
 
             if ($serviceStarted) {
                 Write-Success "服务启动完成"
+                # Start watchdog
+                Write-Info "启动守护进程..."
+                Start-WatchdogInternal
             }
             else {
                 Write-Warning "无法确认服务状态，请手动检查"
@@ -688,29 +1017,38 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
     Write-Host ""
     Write-Title "✓ 配置和启动完成！"
     Write-Host "  服务地址: $script:ServiceUrl" -ForegroundColor Green
+    if (Test-WatchdogRunning) {
+        Write-Host "  守护进程: 已启动 (自动监控重启)" -ForegroundColor Green
+    }
     Write-Host "  工作目录: $script:WorkDir" -ForegroundColor Gray
     Write-Host "  监控面板: https://ericc-ch.github.io/copilot-api?endpoint=$script:ServiceUrl/usage" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "重要提示：" -ForegroundColor Yellow
     Write-Host "  - 需要重启 IDE/编辑器使环境变量生效"
-    Write-Host "  - 服务已在后台运行，关闭此窗口不影响服务"
+    Write-Host "  - 服务和守护进程在后台运行，关闭此窗口不影响运行"
+    Write-Host "  - 守护进程会在服务异常时自动重启服务"
     Write-Host ""
 }
 
 # 主菜单
 function Show-MainMenu {
     while ($true) {
-        Clear-Host
-        Write-Title "GitHub Copilot API 管理工具 (独立版)"
+        Clear-HostSafe
+        Write-Title "GitHub Copilot API 管理工具"
 
         Write-Host "  工作目录: $script:WorkDir" -ForegroundColor Gray
         Write-Host ""
-        Write-Host "  1. 配置全局环境变量" -ForegroundColor White
-        Write-Host "  2. 清除全局环境变量" -ForegroundColor White
-        Write-Host "  3. 启动 Copilot API 服务" -ForegroundColor White
-        Write-Host "  4. 停止 Copilot API 服务" -ForegroundColor White
-        Write-Host "  5. 检查服务状态" -ForegroundColor White
-        Write-Host "  6. 一键配置并启动" -ForegroundColor Green
+        Write-Host "  [服务管理]" -ForegroundColor Yellow
+        Write-Host "  1. 启动服务 (含守护进程)" -ForegroundColor Green
+        Write-Host "  2. 停止服务" -ForegroundColor White
+        Write-Host "  3. 检查服务状态" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  [环境配置]" -ForegroundColor Yellow
+        Write-Host "  4. 配置全局环境变量" -ForegroundColor White
+        Write-Host "  5. 清除全局环境变量" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  [快捷操作]" -ForegroundColor Yellow
+        Write-Host "  6. 一键配置并启动" -ForegroundColor Cyan
         Write-Host "  0. 退出" -ForegroundColor Gray
         Write-Host ""
         Write-Host "======================================" -ForegroundColor Cyan
@@ -719,23 +1057,23 @@ function Show-MainMenu {
 
         switch ($choice) {
             "1" {
-                Invoke-SetupEnv
-                Read-Host "按 Enter 继续"
-            }
-            "2" {
-                Remove-EnvironmentVariables
-                Read-Host "按 Enter 继续"
-            }
-            "3" {
                 Start-CopilotService
                 Read-Host "按 Enter 继续"
             }
-            "4" {
+            "2" {
                 Stop-CopilotService
                 Read-Host "按 Enter 继续"
             }
-            "5" {
+            "3" {
                 Show-ServiceStatus
+                Read-Host "按 Enter 继续"
+            }
+            "4" {
+                Invoke-SetupEnv
+                Read-Host "按 Enter 继续"
+            }
+            "5" {
+                Remove-EnvironmentVariables
                 Read-Host "按 Enter 继续"
             }
             "6" {
@@ -754,5 +1092,8 @@ function Show-MainMenu {
     }
 }
 
-# 启动主菜单
-Show-MainMenu
+# Entry point - only show menu if script is run directly (not dot-sourced)
+# When dot-sourced, $MyInvocation.InvocationName will be "."
+if ($MyInvocation.InvocationName -ne ".") {
+    Show-MainMenu
+}
