@@ -23,58 +23,6 @@ $script:HealthCheckInterval = 30  # Health check interval in seconds
 $script:MaxRestartAttempts = 5    # Maximum restart attempts within cooldown period
 $script:RestartCooldown = 300     # Cooldown period in seconds (5 minutes)
 
-# 模型配置方案
-$script:ModelPresets = @{
-    "1" = @{
-        Name = "gpt-5.1-codex (Sonnet) + gpt-5-mini (Haiku)"
-        Sonnet = "gpt-5.1-codex"
-        Haiku = "gpt-5-mini"
-        Category = "OpenAI GPT-5 系列"
-    }
-    "2" = @{
-        Name = "gpt-5.2 (Sonnet) + gpt-5-mini (Haiku)"
-        Sonnet = "gpt-5.2"
-        Haiku = "gpt-5-mini"
-        Category = "OpenAI GPT-5 系列"
-    }
-    "3" = @{
-        Name = "gpt-5 (Sonnet) + gpt-5-mini (Haiku)"
-        Sonnet = "gpt-5"
-        Haiku = "gpt-5-mini"
-        Category = "OpenAI GPT-5 系列"
-    }
-    "4" = @{
-        Name = "gpt-4.1 (Sonnet) + gpt-4o-mini (Haiku)"
-        Sonnet = "gpt-4.1"
-        Haiku = "gpt-4o-mini"
-        Category = "OpenAI GPT-4 系列"
-    }
-    "5" = @{
-        Name = "gpt-4o (Sonnet) + gpt-4o-mini (Haiku)"
-        Sonnet = "gpt-4o"
-        Haiku = "gpt-4o-mini"
-        Category = "OpenAI GPT-4 系列"
-    }
-    "6" = @{
-        Name = "claude-sonnet-4.5 (Sonnet) + claude-haiku-4.5 (Haiku) [推荐]"
-        Sonnet = "claude-sonnet-4.5"
-        Haiku = "claude-haiku-4.5"
-        Category = "Anthropic Claude 系列"
-    }
-    "7" = @{
-        Name = "claude-opus-4.5 (Sonnet) + claude-haiku-4.5 (Haiku)"
-        Sonnet = "claude-opus-4.5"
-        Haiku = "claude-haiku-4.5"
-        Category = "Anthropic Claude 系列"
-    }
-    "8" = @{
-        Name = "gemini-2.5-pro (Sonnet) + gemini-3-flash-preview (Haiku)"
-        Sonnet = "gemini-2.5-pro"
-        Haiku = "gemini-3-flash-preview"
-        Category = "Google Gemini 系列"
-    }
-}
-
 # 辅助函数
 function Write-Title {
     param([string]$Title)
@@ -161,8 +109,8 @@ function Start-ServiceInternal {
         Start-Sleep -Milliseconds 500
         Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
         
-        # Wait for service to start (max 15 seconds)
-        $maxAttempts = 15
+        # Wait for service to start (max 30 seconds)
+        $maxAttempts = 30
         $attempt = 0
         while ($attempt -lt $maxAttempts) {
             Start-Sleep -Seconds 1
@@ -389,41 +337,183 @@ function Get-ServiceProcess {
     return $null
 }
 
+function Get-AvailableModels {
+    # Fetch available models from the API
+    try {
+        $response = Invoke-WebRequest -Uri "$script:ServiceUrl/v1/models" -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
+        $data = $response.Content | ConvertFrom-Json
+        return $data.data
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-FilteredModels {
+    param([array]$Models)
+    
+    # Filter criteria
+    $skipPatterns = @(
+        '^text-embedding',       # embedding models
+        '^goldeneye',            # internal models
+        '.*-copilot$',           # copilot-specific models
+        '^gpt-3\.5',             # outdated models
+        '^gpt-4-0',             # old dated gpt-4 variants
+        '^gpt-4$',              # base gpt-4
+        '^gpt-4-o-preview$',    # old preview alias
+        '^gpt-4o$',             # outdated standalone (superseded by gpt-4.1/5)
+        '^gpt-4o-mini$',        # outdated standalone (superseded by gpt-4.1-mini/5-mini)
+        '^gpt-4\.1$',           # base gpt-4.1 (dated version preferred)
+        '^gpt-4\.1-mini$',      # base gpt-4.1-mini (dated version preferred)
+        '^gpt-4\.1-nano$',      # base gpt-4.1-nano (dated version preferred)
+        '-\d{4}-\d{2}-\d{2}$'  # dated versions like gpt-4o-2024-05-13
+    )
+    
+    $seenIds = @{}
+    $filtered = @()
+    
+    foreach ($m in $Models) {
+        $mid = $m.id
+        $display = if ($m.display_name) { $m.display_name } else { $mid }
+        $owned = if ($m.owned_by) { $m.owned_by } else { "Unknown" }
+        
+        # Skip duplicates
+        if ($seenIds.ContainsKey($mid)) { continue }
+        
+        # Skip by pattern
+        $skip = $false
+        foreach ($pat in $skipPatterns) {
+            if ($mid -match $pat) {
+                $skip = $true
+                break
+            }
+        }
+        if ($skip) { continue }
+        
+        $seenIds[$mid] = $true
+        
+        # Normalize vendor name
+        $vendor = switch -Regex ($owned.ToLower()) {
+            'anthropic' { 'Anthropic'; break }
+            'openai|azure' { 'OpenAI'; break }
+            'google' { 'Google'; break }
+            default { '其他' }
+        }
+        
+        $filtered += [PSCustomObject]@{
+            Vendor = $vendor
+            Id = $mid
+            DisplayName = $display
+            VendorOrder = switch ($vendor) {
+                'Anthropic' { 0 }
+                'OpenAI' { 1 }
+                'Google' { 2 }
+                default { 3 }
+            }
+        }
+    }
+    
+    # Sort by vendor order, then by id
+    return $filtered | Sort-Object VendorOrder, Id
+}
+
+function Select-ModelFromList {
+    param(
+        [string]$Role,
+        [array]$Models
+    )
+    
+    Write-Host ""
+    Write-Host "请选择 " -NoNewline -ForegroundColor White
+    Write-Host "$Role" -NoNewline -ForegroundColor Cyan
+    Write-Host " 的模型：" -ForegroundColor White
+    Write-Host ""
+    
+    $currentVendor = ""
+    $index = 0
+    $modelMap = @{}
+    
+    foreach ($m in $Models) {
+        if ($m.Vendor -ne $currentVendor) {
+            if ($currentVendor -ne "") { Write-Host "" }
+            Write-Host "  === $($m.Vendor) ===" -ForegroundColor Yellow
+            $currentVendor = $m.Vendor
+        }
+        $index++
+        $modelMap[$index] = $m.Id
+        Write-Host "  $index. $($m.DisplayName) ($($m.Id))"
+    }
+    
+    Write-Host ""
+    Write-Host "  0. 自定义模型"
+    Write-Host ""
+    
+    $choice = Read-Host "请选择 (0-$index)"
+    
+    if ($choice -eq "0") {
+        $custom = Read-Host "请输入模型名称"
+        return $custom
+    }
+    
+    $choiceInt = 0
+    if ([int]::TryParse($choice, [ref]$choiceInt) -and $choiceInt -ge 1 -and $choiceInt -le $index) {
+        return $modelMap[$choiceInt]
+    }
+    
+    return $null
+}
+
 function Show-ModelSelectionMenu {
     param([string]$Title = "配置全局环境变量")
 
     Clear-HostSafe
     Write-Title $Title
-    Write-Host "请选择模型配置方案：" -ForegroundColor White
-    Write-Host ""
+    Write-Info "正在从 API 获取可用模型..."
 
-    # 按类别分组显示
-    $categories = $script:ModelPresets.Values | Select-Object -ExpandProperty Category -Unique
-    foreach ($category in $categories) {
-        Write-Host "  === $category ===" -ForegroundColor Yellow
-        $script:ModelPresets.GetEnumerator() | Where-Object { $_.Value.Category -eq $category } | ForEach-Object {
-            $key = $_.Key
-            $name = $_.Value.Name
-            if ($name -match "\[推荐\]") {
-                Write-Host "  $key. $name" -ForegroundColor Green
-            } else {
-                Write-Host "  $key. $name"
-            }
-        }
+    $rawModels = Get-AvailableModels
+    if ($null -eq $rawModels) {
         Write-Host ""
+        Write-Error "无法获取模型列表。服务是否在端口 ${script:Port} 上运行？"
+        Write-Info "请先启动服务（主菜单选项 1）"
+        Write-Host ""
+        return "FETCH_FAILED"
     }
 
-    Write-Host "  === 其他 ===" -ForegroundColor Yellow
-    Write-Host "  9. 自定义模型"
-    Write-Host "  0. 返回主菜单"
-    Write-Host ""
+    $models = Get-FilteredModels -Models $rawModels
+    if ($models.Count -eq 0) {
+        Write-Error "过滤后没有可用模型"
+        return "FETCH_FAILED"
+    }
 
-    $choice = Read-Host "请选择 (0-9)"
-    return $choice
+    Write-Success "找到 $($models.Count) 个可用模型"
+
+    # Step 1: Select Opus model (powerful model)
+    $opusModel = Select-ModelFromList -Role "Opus (强力模型)" -Models $models
+    if ([string]::IsNullOrWhiteSpace($opusModel)) {
+        Write-Error "无效选择"
+        return "INVALID"
+    }
+
+    # Step 2: Select Sonnet model (main model)
+    $sonnetModel = Select-ModelFromList -Role "Sonnet (主模型)" -Models $models
+    if ([string]::IsNullOrWhiteSpace($sonnetModel)) {
+        Write-Error "无效选择"
+        return "INVALID"
+    }
+
+    # Step 3: Select Haiku model (fast model)
+    $haikuModel = Select-ModelFromList -Role "Haiku (快速模型)" -Models $models
+    if ([string]::IsNullOrWhiteSpace($haikuModel)) {
+        Write-Error "无效选择"
+        return "INVALID"
+    }
+
+    return "$opusModel|$sonnetModel|$haikuModel"
 }
 
 function Set-EnvironmentVariables {
     param(
+        [string]$OpusModel,
         [string]$SonnetModel,
         [string]$HaikuModel
     )
@@ -432,12 +522,11 @@ function Set-EnvironmentVariables {
     Write-Host "将设置以下环境变量（用户级）：" -ForegroundColor White
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL = $script:ServiceUrl"
-    Write-Host "  ANTHROPIC_AUTH_TOKEN = dummy"
     Write-Host "  ANTHROPIC_MODEL = $SonnetModel"
+    Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL = $OpusModel"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL = $SonnetModel"
     Write-Host "  ANTHROPIC_SMALL_FAST_MODEL = $HaikuModel"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL = $HaikuModel"
-    Write-Host "  DISABLE_NON_ESSENTIAL_MODEL_CALLS = 1"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1"
     Write-Host ""
     Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
@@ -456,11 +545,11 @@ function Set-EnvironmentVariables {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
         Write-Success "ANTHROPIC_BASE_URL"
 
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
-        Write-Success "ANTHROPIC_AUTH_TOKEN"
-
         [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $SonnetModel, "User")
         Write-Success "ANTHROPIC_MODEL"
+
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $OpusModel, "User")
+        Write-Success "ANTHROPIC_DEFAULT_OPUS_MODEL"
 
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $SonnetModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_SONNET_MODEL"
@@ -471,14 +560,32 @@ function Set-EnvironmentVariables {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $HaikuModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_HAIKU_MODEL"
 
-        [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1", "User")
-        Write-Success "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
-
         [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
         Write-Success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
 
         Write-Host ""
         Write-Title "✓ 环境变量设置完成！"
+        
+        # Auto-restart service if running, so new env vars take effect
+        if (Test-PortInUse -Port $script:Port) {
+            Write-Host ""
+            Write-Info "正在重启服务以应用新配置..."
+            Stop-ServiceInternal
+            Start-Sleep -Seconds 1
+            if (Start-ServiceInternal) {
+                Write-Success "服务已使用新配置重启"
+                # Restart watchdog too
+                if (Test-WatchdogRunning) {
+                    Stop-WatchdogInternal
+                    Start-WatchdogInternal
+                }
+            }
+            else {
+                Write-Error "服务重启失败，请手动重启（选项 1）"
+            }
+        }
+        
+        Write-Host ""
         Write-Host "重要提示：" -ForegroundColor Yellow
         Write-Host "  1. 需要重启所有已打开的命令行窗口"
         Write-Host "  2. 需要重启 IDE/编辑器（如 VS Code）"
@@ -500,12 +607,11 @@ function Remove-EnvironmentVariables {
     Write-Host "此操作将删除以下环境变量：" -ForegroundColor White
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL"
-    Write-Host "  ANTHROPIC_AUTH_TOKEN"
     Write-Host "  ANTHROPIC_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL"
+    Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL"
     Write-Host "  ANTHROPIC_SMALL_FAST_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
-    Write-Host "  DISABLE_NON_ESSENTIAL_MODEL_CALLS"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     Write-Host ""
     Write-Host "清除后，Claude Code 将恢复使用 Anthropic 官方 API" -ForegroundColor Yellow
@@ -522,12 +628,11 @@ function Remove-EnvironmentVariables {
 
     $variables = @(
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     )
 
@@ -539,6 +644,17 @@ function Remove-EnvironmentVariables {
         catch {
             Write-Warning "$var 删除失败或不存在"
         }
+    }
+
+    # Also clean up any deprecated/unknown ANTHROPIC_ variables
+    $deprecatedVars = [Environment]::GetEnvironmentVariables("User").Keys | 
+        Where-Object { $_ -match "^ANTHROPIC_" -and $_ -notin $variables }
+    foreach ($var in $deprecatedVars) {
+        try {
+            [Environment]::SetEnvironmentVariable($var, $null, "User")
+            Write-Warning "$var (已弃用) 已删除"
+        }
+        catch {}
     }
 
     Write-Host ""
@@ -609,7 +725,7 @@ function Start-CopilotService {
         $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
-WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
+WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copilot-api.log 2>&1", 0, False
 "@
 
         $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
@@ -624,8 +740,8 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
 
         Write-Info "等待服务启动..."
 
-        # 多次尝试检测端口（最多 15 秒，首次启动可能需要下载）
-        $maxAttempts = 15
+        # 多次尝试检测端口（最多 30 秒，首次启动可能需要下载）
+        $maxAttempts = 30
         $attempt = 0
         $serviceStarted = $false
 
@@ -784,7 +900,7 @@ function Show-ServiceStatus {
     Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
 
     $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "DISABLE_NON_ESSENTIAL_MODEL_CALLS" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" } |
+        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" } |
         Sort-Object
 
     if ($envVarNames.Count -gt 0) {
@@ -844,144 +960,65 @@ function Show-ServiceStatus {
 }
 
 function Invoke-SetupEnv {
-    $choice = Show-ModelSelectionMenu -Title "配置全局环境变量"
+    $result = Show-ModelSelectionMenu -Title "配置全局环境变量"
 
-    if ($choice -eq "0") {
-        return
-    }
-
-    if ($choice -eq "9") {
-        Write-Host ""
-        $sonnetModel = Read-Host "请输入 Sonnet 模型名称"
-        $haikuModel = Read-Host "请输入 Haiku 模型名称"
-
-        if ([string]::IsNullOrWhiteSpace($sonnetModel) -or [string]::IsNullOrWhiteSpace($haikuModel)) {
-            Write-Error "模型名称不能为空"
-            Start-Sleep -Seconds 2
-            return
-        }
-    }
-    elseif ($script:ModelPresets.ContainsKey($choice)) {
-        $preset = $script:ModelPresets[$choice]
-        $sonnetModel = $preset.Sonnet
-        $haikuModel = $preset.Haiku
-    }
-    else {
-        Write-Error "无效选择"
+    if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
         Start-Sleep -Seconds 2
         return
     }
 
-    Set-EnvironmentVariables -SonnetModel $sonnetModel -HaikuModel $haikuModel
+    $parts = $result -split '\|'
+    $opusModel = $parts[0]
+    $sonnetModel = $parts[1]
+    $haikuModel = $parts[2]
+
+    if ([string]::IsNullOrWhiteSpace($opusModel) -or [string]::IsNullOrWhiteSpace($sonnetModel) -or [string]::IsNullOrWhiteSpace($haikuModel)) {
+        Write-Error "无效的模型选择"
+        Start-Sleep -Seconds 2
+        return
+    }
+
+    Set-EnvironmentVariables -OpusModel $opusModel -SonnetModel $sonnetModel -HaikuModel $haikuModel
 }
 
 function Invoke-QuickStart {
-    $choice = Show-ModelSelectionMenu -Title "一键配置并启动"
-
-    if ($choice -eq "0") {
-        return
-    }
-
-    if ($choice -eq "9") {
-        Write-Host ""
-        $sonnetModel = Read-Host "请输入 Sonnet 模型名称"
-        $haikuModel = Read-Host "请输入 Haiku 模型名称"
-
-        if ([string]::IsNullOrWhiteSpace($sonnetModel) -or [string]::IsNullOrWhiteSpace($haikuModel)) {
-            Write-Error "模型名称不能为空"
-            Start-Sleep -Seconds 2
-            return
-        }
-    }
-    elseif ($script:ModelPresets.ContainsKey($choice)) {
-        $preset = $script:ModelPresets[$choice]
-        $sonnetModel = $preset.Sonnet
-        $haikuModel = $preset.Haiku
-    }
-    else {
-        Write-Error "无效选择"
-        Start-Sleep -Seconds 2
-        return
-    }
-
     Clear-HostSafe
     Write-Title "一键配置并启动"
 
-    Write-Host "此操作将：" -ForegroundColor White
-    Write-Host "  1. 配置全局环境变量 (Sonnet: $sonnetModel, Haiku: $haikuModel)"
-    Write-Host "  2. 启动服务和守护进程"
-    Write-Host ""
+    # Step 1: Start service if not running
+    Write-Info "[步骤 1/3] 检查服务..."
 
-    $confirm = Read-Host "确认执行? (Y/N)"
-    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
-        Write-Warning "操作已取消"
-        return
-    }
-
-    # 步骤 1: 配置环境变量
-    Write-Host ""
-    Write-Info "[步骤 1/2] 配置全局环境变量..."
-
-    try {
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $sonnetModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_SMALL_FAST_MODEL", $haikuModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
-        [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", "1", "User")
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
-
-        Write-Success "环境变量配置完成"
-    }
-    catch {
-        Write-Error "配置环境变量失败: $_"
-        return
-    }
-
-    # 步骤 2: 启动服务
-    Write-Host ""
-    Write-Info "[步骤 2/2] 启动服务..."
-
-    # 检查 Node.js
-    try {
-        $nodeVersion = node --version 2>$null
-        if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-PortInUse -Port $script:Port)) {
+        try {
+            $nodeVersion = node --version 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "未找到 Node.js，请先安装 Node.js"
+                return
+            }
+        }
+        catch {
             Write-Error "未找到 Node.js，请先安装 Node.js"
             return
         }
-    }
-    catch {
-        Write-Error "未找到 Node.js，请先安装 Node.js"
-        return
-    }
 
-    # 检查端口并启动服务
-    if (Test-PortInUse -Port $script:Port) {
-        Write-Info "服务已在运行"
-        # Ensure watchdog is running
-        if (-not (Test-WatchdogRunning)) {
-            Write-Info "启动守护进程..."
-            Start-WatchdogInternal
-        }
-    }
-    else {
+        Write-Info "启动 Copilot API 服务器..."
+        Write-Host ""
+        Write-Host "如果出现提示，请在下方完成 GitHub 设备授权：" -ForegroundColor Yellow
+        Write-Host ""
+
         try {
-            # 使用 VBScript 后台启动服务
             $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
-WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copilot-api.log 2>&1", 0, False
+WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copilot-api.log 2>&1", 0, False
 "@
-
             $vbsFile = Join-Path $env:TEMP "start-copilot-api.vbs"
             $vbsScript | Out-File -FilePath $vbsFile -Encoding ASCII
             Start-Process -FilePath "cscript.exe" -ArgumentList "//nologo", "`"$vbsFile`"" -WindowStyle Hidden
             Start-Sleep -Milliseconds 500
             Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
 
-            # 等待服务启动
-            $maxAttempts = 15
+            $maxAttempts = 30
             $attempt = 0
             $serviceStarted = $false
 
@@ -994,25 +1031,96 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port > copil
                 $attempt++
             }
 
-            if ($serviceStarted) {
-                Write-Success "服务启动完成"
-                # Start watchdog
-                Write-Info "启动守护进程..."
-                Start-WatchdogInternal
+            if (-not $serviceStarted) {
+                Write-Error "服务启动失败，请检查日志文件: $script:LogFile"
+                return
             }
-            else {
-                Write-Warning "无法确认服务状态，请手动检查"
-            }
+            Write-Success "服务启动完成"
         }
         catch {
             Write-Error "启动服务失败: $_"
             return
         }
     }
+    else {
+        Write-Success "服务已在运行"
+    }
+
+    # Start watchdog
+    if (-not (Test-WatchdogRunning)) {
+        Write-Info "启动守护进程..."
+        Start-WatchdogInternal
+    }
+
+    # Step 2: Fetch models and let user select
+    Write-Info "[步骤 2/3] 获取可用模型..."
+
+    $result = Show-ModelSelectionMenu -Title "一键配置并启动"
+
+    if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
+        Write-Host ""
+        Write-Warning "模型选择已取消。服务仍在运行。"
+        return
+    }
+
+    $parts = $result -split '\|'
+    $opusModel = $parts[0]
+    $sonnetModel = $parts[1]
+    $haikuModel = $parts[2]
+
+    if ([string]::IsNullOrWhiteSpace($opusModel) -or [string]::IsNullOrWhiteSpace($sonnetModel) -or [string]::IsNullOrWhiteSpace($haikuModel)) {
+        Write-Error "无效的模型选择"
+        return
+    }
+
+    # Step 3: Configure environment variables
+    Write-Info "[步骤 3/3] 配置全局环境变量..."
+
+    try {
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $sonnetModel, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $opusModel, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_SMALL_FAST_MODEL", $haikuModel, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
+        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
+
+        # Remove deprecated vars
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", $null, "User")
+        [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", $null, "User")
+
+        Write-Success "环境变量配置完成"
+    }
+    catch {
+        Write-Error "配置环境变量失败: $_"
+        return
+    }
+
+    # Restart service to apply new env vars
+    Write-Info "正在重启服务以应用新配置..."
+    Stop-ServiceInternal
+    Start-Sleep -Seconds 1
+    if (Start-ServiceInternal) {
+        Write-Success "服务已使用新配置重启"
+        # Restart watchdog too
+        if (-not (Test-WatchdogRunning)) {
+            Start-WatchdogInternal
+        }
+        else {
+            Stop-WatchdogInternal
+            Start-WatchdogInternal
+        }
+    }
+    else {
+        Write-Error "服务重启失败，请手动重启（选项 1）"
+    }
 
     Write-Host ""
     Write-Title "✓ 配置和启动完成！"
     Write-Host "  服务地址: $script:ServiceUrl" -ForegroundColor Green
+    Write-Host "  Opus 模型: $opusModel" -ForegroundColor Green
+    Write-Host "  Sonnet 模型: $sonnetModel" -ForegroundColor Green
+    Write-Host "  Haiku 模型: $haikuModel" -ForegroundColor Green
     if (Test-WatchdogRunning) {
         Write-Host "  守护进程: 已启动 (自动监控重启)" -ForegroundColor Green
     }
