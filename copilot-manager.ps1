@@ -783,24 +783,20 @@ function Show-ServiceStatus {
     Write-Host ""
     Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
 
-    $baseUrl = [Environment]::GetEnvironmentVariable("ANTHROPIC_BASE_URL", "User")
-    if ($baseUrl -eq $script:ServiceUrl) {
-        Write-Host "  BASE_URL: " -NoNewline
-        Write-Host "[✓] 已配置" -ForegroundColor Green
-    }
-    else {
-        Write-Host "  BASE_URL: " -NoNewline
-        Write-Host "[×] 未配置或配置错误" -ForegroundColor Red
-    }
+    $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
+        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "DISABLE_NON_ESSENTIAL_MODEL_CALLS" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" } |
+        Sort-Object
 
-    $model = [Environment]::GetEnvironmentVariable("ANTHROPIC_MODEL", "User")
-    if ($model) {
-        Write-Host "  MODEL:    " -NoNewline
-        Write-Host "[✓] $model" -ForegroundColor Green
+    if ($envVarNames.Count -gt 0) {
+        foreach ($varName in $envVarNames) {
+            $varValue = [Environment]::GetEnvironmentVariable($varName, "User")
+            Write-Host "  ${varName}: " -NoNewline
+            Write-Host "[✓] $varValue" -ForegroundColor Green
+        }
     }
     else {
-        Write-Host "  MODEL:    " -NoNewline
-        Write-Host "[×] 未配置" -ForegroundColor Red
+        Write-Host "  " -NoNewline
+        Write-Host "[×] 未配置任何环境变量" -ForegroundColor Red
     }
 
     # 守护进程状态
