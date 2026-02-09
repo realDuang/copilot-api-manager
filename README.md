@@ -123,7 +123,7 @@ copilot-api-manager/
 
 ## ❤️ 致谢
 
-- [copilot-api](https://github.com/nicepkg/copilot-api) — 由 nicepkg 开发的核心代理服务。
+- [copilot-api](https://github.com/ericc-ch/copilot-api) — 由 ericc-ch 开发的核心代理服务。
 
 ## 📄 开源协议
 
