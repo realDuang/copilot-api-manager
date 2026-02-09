@@ -8,6 +8,7 @@
 
 - **服务管理**：一键启动/停止 `copilot-api` 服务。
 - **动态模型获取**：从 API 实时获取模型列表，而非硬编码。
+- **智能模型过滤**：自动过滤过时模型（如 `gpt-3.5`、`gpt-4o`、带日期后缀的版本等）和内部模型，仅展示最新可用模型。
 - **三步模型选择**：
   - Opus (强力型)
   - Sonnet (主流型)
@@ -15,16 +16,16 @@
 - **厂商分组**：模型按厂商排序：Anthropic → OpenAI → Google → 其他。
 - **自动环境配置**：为 Claude Code 自动配置必要的环境变量。
 - **守护进程 (Watchdog)**：每 10 秒自动健康检查，失败自动重启（5 分钟内最多重启 5 次）。
-- **配置联动**：环境变量修改后自动重启服务。
+- **配置联动**：环境变量修改后自动重启服务，无需手动操作。
 - **跨平台支持**：支持 macOS/Linux (`.sh`) 和 Windows (`.ps1`)。
 
 ## 📋 前提条件
 
 - **Node.js**：用于通过 `npx` 运行 `copilot-api`。
 - **GitHub Copilot 订阅**：个人版或商业版。
-- **Python 3**：仅 macOS/Linux 脚本需要（用于 JSON 模型解析）。
+- **Python 3**：仅 macOS/Linux 脚本需要（用于 JSON 模型解析和排序）。
 - **Shell 环境**：
-  - macOS/Linux: `zsh`
+  - macOS/Linux: `zsh`（默认）或 `bash`
   - Windows: PowerShell 5.1+
 
 ## ⚡ 快速开始
@@ -48,22 +49,28 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 | 选项 | 描述 |
 |:---:|---|
-| 1 | 启动服务 (同时启动守护进程) |
+| 1 | 启动服务（同时启动守护进程） |
 | 2 | 停止服务 |
 | 3 | 检查服务状态 |
 | 4 | 配置环境变量 |
-| 5 | 移除环境变量 |
-| 6 | 一键设置并启动 (推荐首次使用) |
+| 5 | 清除环境变量 |
+| 6 | 一键配置并启动（推荐首次使用） |
 | 0 | 退出 |
 
 ## 🤖 模型选择
 
 脚本采用三步选择流程，分别为 Claude Code 的不同场景配置模型：
-1. **Opus 模型** → 设置 `ANTHROPIC_DEFAULT_OPUS_MODEL` (Claude Code 用于处理复杂任务)。
-2. **Sonnet 模型** → 设置 `ANTHROPIC_MODEL` 和 `ANTHROPIC_DEFAULT_SONNET_MODEL` (大部分任务的主力模型)。
-3. **Haiku 模型** → 设置 `ANTHROPIC_SMALL_FAST_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL` (用于简单任务的快速模型)。
+1. **Opus 模型** → 设置 `ANTHROPIC_DEFAULT_OPUS_MODEL`（Claude Code 用于处理复杂任务）。
+2. **Sonnet 模型** → 设置 `ANTHROPIC_MODEL` 和 `ANTHROPIC_DEFAULT_SONNET_MODEL`（大部分任务的主力模型）。
+3. **Haiku 模型** → 设置 `ANTHROPIC_SMALL_FAST_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL`（用于简单任务的快速模型）。
 
-模型是从正在运行的服务的 `http://localhost:4141/v1/models` 接口实时获取的，过滤掉了过时或内部模型，并按厂商进行了分组显示。
+模型是从正在运行的服务的 `http://localhost:4141/v1/models` 接口实时获取的。脚本会自动过滤以下类型的模型：
+- 嵌入模型（`text-embedding-*`）
+- 内部模型（`goldeneye-*`、`*-copilot`）
+- 过时模型（`gpt-3.5`、`gpt-4`、`gpt-4o`、`gpt-4o-mini` 等）
+- 带日期后缀的版本（如 `*-2024-05-13`，优先使用无日期别名）
+
+过滤后的模型按厂商分组显示，同时支持自定义输入任意模型名称。
 
 ## 🌐 环境变量
 
@@ -72,20 +79,27 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 变量名 | 描述 | 示例值 |
 |---|---|---|
 | `ANTHROPIC_BASE_URL` | 代理服务基础地址 | `http://localhost:4141` |
-| `ANTHROPIC_MODEL` | 主模型 (Sonnet) | `claude-sonnet-4-20250514` |
+| `ANTHROPIC_MODEL` | 主模型（Sonnet） | `claude-sonnet-4-20250514` |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | Opus 模型 | `claude-opus-4-20250514` |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Sonnet 模型 | `claude-sonnet-4-20250514` |
 | `ANTHROPIC_SMALL_FAST_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要流量 | `1` |
 
+> **注意**：以上示例值仅供参考，实际可选模型由 API 实时返回。脚本会自动过滤过时版本，请从列表中选择最新可用模型。
+
+**平台差异：**
+- **Windows**：环境变量设置为用户级系统环境变量（通过注册表），需重启终端和 IDE 生效。
+- **macOS/Linux**：环境变量写入 Shell 配置文件（`~/.zshrc` 或 `~/.bash_profile`），需 `source` 或重启终端生效。
+
 ## 🛡️ 守护进程 (Watchdog)
 
-- **自动检查**：每 10 秒进行一次健康检查。
+- **自动检查**：每 10 秒进行一次健康检查（通过 `/v1/models` 端点验证服务可用性）。
 - **速率限制**：如果服务失败，会自动重启，但在 5 分钟窗口内最多重启 5 次，以防止无限循环。
 - **心跳日志**：每 30 秒记录一次心跳信息。
 - **自动启动**：随服务一起启动（选项 1 和 6）。
 - **日志记录**：详细运行信息记录在 `watchdog.log` 中。
+- **独立运行**：守护进程和服务在后台运行，关闭管理脚本窗口不影响运行。
 
 ## 📊 仪表板
 
@@ -102,14 +116,14 @@ copilot-api-manager/
 └── README.md                   # 本文件
 ```
 
-**自动生成的文件 (已在 .gitignore 中忽略):**
-- `copilot-watchdog.sh` / `copilot-watchdog.ps1` - 守护进程脚本
-- `copilot-api.log` - 服务运行日志
-- `watchdog.log` - 守护进程日志
+**自动生成的文件（已在 .gitignore 中忽略）：**
+- `copilot-watchdog.sh` / `copilot-watchdog.ps1` — 守护进程脚本
+- `copilot-api.log` — 服务运行日志
+- `watchdog.log` — 守护进程日志
 
 ## ❤️ 致谢
 
-- [copilot-api](https://github.com/nicepkg/copilot-api) - 由 nicepkg 开发的核心代理服务。
+- [copilot-api](https://github.com/nicepkg/copilot-api) — 由 nicepkg 开发的核心代理服务。
 
 ## 📄 开源协议
 

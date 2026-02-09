@@ -1,9 +1,2 @@
 # Logs
 *.log
-
-# Auto-generated watchdog scripts
-copilot-watchdog.ps1
-copilot-watchdog.sh
-
-# Windows
-nul
