@@ -464,10 +464,7 @@ function Select-ModelFromList {
 }
 
 function Show-ModelSelectionMenu {
-    param([string]$Title = "配置全局环境变量")
-
-    Clear-HostSafe
-    Write-Title $Title
+    Write-Host ""
     Write-Info "正在从 API 获取可用模型..."
 
     $rawModels = Get-AvailableModels
@@ -636,26 +633,54 @@ function Remove-EnvironmentVariables {
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     )
 
+    # Use registry to completely remove environment variables (key + value)
+    $regPath = "HKCU:\Environment"
+
     foreach ($var in $variables) {
         try {
-            [Environment]::SetEnvironmentVariable($var, $null, "User")
-            Write-Success "$var 已删除"
+            # Check if variable exists in registry
+            $existingValue = Get-ItemProperty -Path $regPath -Name $var -ErrorAction SilentlyContinue
+            if ($null -ne $existingValue) {
+                # Remove from registry (completely deletes key)
+                Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
+                # Also clear from .NET cache
+                [Environment]::SetEnvironmentVariable($var, $null, "User")
+                Write-Success "$var 已删除"
+            }
+            else {
+                Write-Info "$var 不存在，跳过"
+            }
         }
         catch {
-            Write-Warning "$var 删除失败或不存在"
+            Write-Warning "$var 删除失败: $_"
         }
     }
 
     # Also clean up any deprecated/unknown ANTHROPIC_ variables
-    $deprecatedVars = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -and $_ -notin $variables }
+    $allUserVars = Get-Item -Path $regPath | Select-Object -ExpandProperty Property
+    $deprecatedVars = $allUserVars | Where-Object { $_ -match "^ANTHROPIC_" -and $_ -notin $variables }
     foreach ($var in $deprecatedVars) {
         try {
+            Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
             [Environment]::SetEnvironmentVariable($var, $null, "User")
             Write-Warning "$var (已弃用) 已删除"
         }
         catch {}
     }
+
+    # Broadcast environment change to notify other applications
+    if (-not ("Win32.NativeMethods" -as [type])) {
+        Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@
+    }
+    $HWND_BROADCAST = [IntPtr]0xffff
+    $WM_SETTINGCHANGE = 0x1a
+    $result = [UIntPtr]::Zero
+    [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
 
     Write-Host ""
     Write-Title "✓ 环境变量清除完成！"
@@ -960,7 +985,10 @@ function Show-ServiceStatus {
 }
 
 function Invoke-SetupEnv {
-    $result = Show-ModelSelectionMenu -Title "配置全局环境变量"
+    Clear-HostSafe
+    Write-Title "配置全局环境变量"
+
+    $result = Show-ModelSelectionMenu
 
     if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
         Start-Sleep -Seconds 2
@@ -1055,7 +1083,7 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
     # Step 2: Fetch models and let user select
     Write-Info "[步骤 2/3] 获取可用模型..."
 
-    $result = Show-ModelSelectionMenu -Title "一键配置并启动"
+    $result = Show-ModelSelectionMenu
 
     if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
         Write-Host ""
