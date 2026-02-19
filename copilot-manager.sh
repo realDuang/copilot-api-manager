@@ -237,15 +237,41 @@ test_service_health() {
 start_service_internal() {
     # Start service without user interaction (for watchdog use)
     cd "${WORK_DIR}"
+
+    # Record log file size before starting, so we only scan new content
+    local log_size=0
+    if [[ -f "${LOG_FILE}" ]]; then
+        log_size=$(wc -c < "${LOG_FILE}" | tr -d ' ')
+    fi
+
     nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
 
-    # Wait for service to start (max 30 seconds)
-    local max_attempts=30
+    # Wait for service to start (max 90 seconds, extended for device auth flow)
+    local max_attempts=90
     local attempt=0
+    local auth_code_shown=false
     while [[ $attempt -lt $max_attempts ]]; do
         sleep 1
         if test_port_in_use ${PORT}; then
             return 0
+        fi
+        # Check log for GitHub device auth code (only show once)
+        if [[ "$auth_code_shown" == "false" && -f "${LOG_FILE}" ]]; then
+            local new_content=$(tail -c +$((log_size + 1)) "${LOG_FILE}" 2>/dev/null)
+            if [[ -n "$new_content" ]]; then
+                local auth_match=$(echo "$new_content" | grep -o 'enter the code "[^"]*" in https://[^ ]*' 2>/dev/null)
+                if [[ -n "$auth_match" ]]; then
+                    local code=$(echo "$auth_match" | grep -o '"[^"]*"' | tr -d '"')
+                    local url=$(echo "$auth_match" | grep -o 'https://[^ ]*')
+                    echo ""
+                    echo "${YELLOW}  ============================================${NC}"
+                    echo "${YELLOW}  GitHub 设备授权码: ${code}${NC}"
+                    echo "${YELLOW}  请在浏览器中打开: ${url}${NC}"
+                    echo "${YELLOW}  ============================================${NC}"
+                    echo ""
+                    auth_code_shown=true
+                fi
+            fi
         fi
         ((attempt++))
     done
@@ -516,12 +542,13 @@ set_environment_variables() {
     echo "${WHITE}将设置以下环境变量：${NC}"
     echo ""
     echo "  ANTHROPIC_BASE_URL = ${SERVICE_URL}"
+    echo "  ANTHROPIC_AUTH_TOKEN = dummy"
     echo "  ANTHROPIC_MODEL = ${sonnet_model}"
     echo "  ANTHROPIC_DEFAULT_OPUS_MODEL = ${opus_model}"
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL = ${sonnet_model}"
-    echo "  ANTHROPIC_SMALL_FAST_MODEL = ${haiku_model}"
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL = ${haiku_model}"
     echo "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1"
+    echo "  DISABLE_TELEMETRY = 1"
     echo ""
     echo "${YELLOW}配置后，所有 Claude Code 会话将使用 Copilot API${NC}"
     echo "${YELLOW}配置文件: ${SHELL_CONFIG}${NC}"
@@ -539,6 +566,8 @@ set_environment_variables() {
     
     add_env_to_shell_config "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
     write_success "ANTHROPIC_BASE_URL"
+    add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"
+    write_success "ANTHROPIC_AUTH_TOKEN"
     
     add_env_to_shell_config "ANTHROPIC_MODEL" "${sonnet_model}"
     write_success "ANTHROPIC_MODEL"
@@ -549,22 +578,23 @@ set_environment_variables() {
     add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
     write_success "ANTHROPIC_DEFAULT_SONNET_MODEL"
     
-    add_env_to_shell_config "ANTHROPIC_SMALL_FAST_MODEL" "${haiku_model}"
-    write_success "ANTHROPIC_SMALL_FAST_MODEL"
-    
     add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
     write_success "ANTHROPIC_DEFAULT_HAIKU_MODEL"
     
     add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
     write_success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     
+    add_env_to_shell_config "DISABLE_TELEMETRY" "1"
+    write_success "DISABLE_TELEMETRY"
+    
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
+    export ANTHROPIC_AUTH_TOKEN="dummy"
     export ANTHROPIC_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
-    export ANTHROPIC_SMALL_FAST_MODEL="${haiku_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+    export DISABLE_TELEMETRY="1"
     
     echo ""
     write_title "✓ 环境变量设置完成！"
@@ -607,9 +637,10 @@ remove_environment_variables() {
     echo "  ANTHROPIC_MODEL"
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     echo "  ANTHROPIC_DEFAULT_OPUS_MODEL"
-    echo "  ANTHROPIC_SMALL_FAST_MODEL"
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
+    echo "  ANTHROPIC_AUTH_TOKEN"
     echo "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    echo "  DISABLE_TELEMETRY"
     echo ""
     echo "${YELLOW}清除后，Claude Code 将恢复使用 Anthropic 官方 API${NC}"
     echo ""
@@ -629,9 +660,10 @@ remove_environment_variables() {
         "ANTHROPIC_MODEL"
         "ANTHROPIC_DEFAULT_SONNET_MODEL"
         "ANTHROPIC_DEFAULT_OPUS_MODEL"
-        "ANTHROPIC_SMALL_FAST_MODEL"
         "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+        "ANTHROPIC_AUTH_TOKEN"
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+        "DISABLE_TELEMETRY"
     )
     
     for var in "${variables[@]}"; do
@@ -705,17 +737,19 @@ start_copilot_service() {
     echo ""
     
     cd "${WORK_DIR}"
+    # Record log file size before starting, so we only scan new content
+    local log_size=0
+    if [[ -f "${LOG_FILE}" ]]; then
+        log_size=$(wc -c < "${LOG_FILE}" | tr -d ' ')
+    fi
+
     # Start service in background, log to file only
     nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
     
-    # Tail the log so user can see auth prompts during startup
-    touch "${LOG_FILE}"
-    tail -f "${LOG_FILE}" &
-    local tail_pid=$!
-    
-    local max_attempts=30
+    local max_attempts=90
     local attempt=0
     local service_started=false
+    local auth_code_shown=false
     
     while [[ $attempt -lt $max_attempts ]]; do
         sleep 1
@@ -723,12 +757,26 @@ start_copilot_service() {
             service_started=true
             break
         fi
+        # Check log for GitHub device auth code (only show once)
+        if [[ "$auth_code_shown" == "false" && -f "${LOG_FILE}" ]]; then
+            local new_content=$(tail -c +$((log_size + 1)) "${LOG_FILE}" 2>/dev/null)
+            if [[ -n "$new_content" ]]; then
+                local auth_match=$(echo "$new_content" | grep -o 'enter the code "[^"]*" in https://[^ ]*' 2>/dev/null)
+                if [[ -n "$auth_match" ]]; then
+                    local code=$(echo "$auth_match" | grep -o '"[^"]*"' | tr -d '"')
+                    local url=$(echo "$auth_match" | grep -o 'https://[^ ]*')
+                    echo ""
+                    echo "${YELLOW}  ============================================${NC}"
+                    echo "${YELLOW}  GitHub 设备授权码: ${code}${NC}"
+                    echo "${YELLOW}  请在浏览器中打开: ${url}${NC}"
+                    echo "${YELLOW}  ============================================${NC}"
+                    echo ""
+                    auth_code_shown=true
+                fi
+            fi
+        fi
         ((attempt++))
     done
-    
-    # Stop tailing log output
-    kill $tail_pid 2>/dev/null
-    wait $tail_pid 2>/dev/null
     
     if [[ "$service_started" == "true" ]]; then
         echo ""
@@ -930,17 +978,19 @@ invoke_quick_start() {
         echo ""
         
         cd "${WORK_DIR}"
+        # Record log file size before starting, so we only scan new content
+        local log_size=0
+        if [[ -f "${LOG_FILE}" ]]; then
+            log_size=$(wc -c < "${LOG_FILE}" | tr -d ' ')
+        fi
+
         # Start service in background, log to file only
         nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
         
-        # Tail the log so user can see auth prompts during startup
-        touch "${LOG_FILE}"
-        tail -f "${LOG_FILE}" &
-        local tail_pid=$!
-        
-        local max_attempts=30
+        local max_attempts=90
         local attempt=0
         local service_started=false
+        local auth_code_shown=false
         
         while [[ $attempt -lt $max_attempts ]]; do
             sleep 1
@@ -948,12 +998,26 @@ invoke_quick_start() {
                 service_started=true
                 break
             fi
+            # Check log for GitHub device auth code (only show once)
+            if [[ "$auth_code_shown" == "false" && -f "${LOG_FILE}" ]]; then
+                local new_content=$(tail -c +$((log_size + 1)) "${LOG_FILE}" 2>/dev/null)
+                if [[ -n "$new_content" ]]; then
+                    local auth_match=$(echo "$new_content" | grep -o 'enter the code "[^"]*" in https://[^ ]*' 2>/dev/null)
+                    if [[ -n "$auth_match" ]]; then
+                        local code=$(echo "$auth_match" | grep -o '"[^"]*"' | tr -d '"')
+                        local url=$(echo "$auth_match" | grep -o 'https://[^ ]*')
+                        echo ""
+                        echo "${YELLOW}  ============================================${NC}"
+                        echo "${YELLOW}  GitHub 设备授权码: ${code}${NC}"
+                        echo "${YELLOW}  请在浏览器中打开: ${url}${NC}"
+                        echo "${YELLOW}  ============================================${NC}"
+                        echo ""
+                        auth_code_shown=true
+                    fi
+                fi
+            fi
             ((attempt++))
         done
-        
-        # Stop tailing log output
-        kill $tail_pid 2>/dev/null
-        wait $tail_pid 2>/dev/null
         
         if [[ "$service_started" != "true" ]]; then
             write_error "服务启动失败，请检查日志文件: ${LOG_FILE}"
@@ -1001,22 +1065,23 @@ invoke_quick_start() {
     add_env_to_shell_config "ANTHROPIC_MODEL" "${sonnet_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
-    add_env_to_shell_config "ANTHROPIC_SMALL_FAST_MODEL" "${haiku_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
     add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
+    add_env_to_shell_config "DISABLE_TELEMETRY" "1"
     
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
     export ANTHROPIC_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
-    export ANTHROPIC_SMALL_FAST_MODEL="${haiku_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+    export DISABLE_TELEMETRY="1"
     
-    # Also remove deprecated vars if they exist
-    remove_env_from_shell_config "ANTHROPIC_AUTH_TOKEN"
+    add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"
+    export ANTHROPIC_AUTH_TOKEN="dummy"
+    
+    # Remove deprecated vars if they exist
     remove_env_from_shell_config "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
-    unset ANTHROPIC_AUTH_TOKEN 2>/dev/null
     unset DISABLE_NON_ESSENTIAL_MODEL_CALLS 2>/dev/null
     
     write_success "环境变量配置完成"

@@ -99,6 +99,12 @@ function Test-ServiceHealth {
 function Start-ServiceInternal {
     # Start service without user interaction (for watchdog use)
     try {
+        # Record log file size before starting, so we only scan new content
+        $logFileSize = 0
+        if (Test-Path $script:LogFile) {
+            $logFileSize = (Get-Item $script:LogFile).Length
+        }
+
         $vbsContent = "Set WshShell = CreateObject(""WScript.Shell"")" + [Environment]::NewLine
         $vbsContent += "WshShell.CurrentDirectory = ""$script:WorkDir""" + [Environment]::NewLine
         $vbsContent += "WshShell.Run ""cmd /c npx -y copilot-api@latest start --port $script:Port >> copilot-api.log 2>&1"", 0, False"
@@ -109,13 +115,37 @@ function Start-ServiceInternal {
         Start-Sleep -Milliseconds 500
         Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
         
-        # Wait for service to start (max 30 seconds)
-        $maxAttempts = 30
+        # Wait for service to start (max 90 seconds, extended for device auth flow)
+        $maxAttempts = 90
         $attempt = 0
+        $authCodeShown = $false
         while ($attempt -lt $maxAttempts) {
             Start-Sleep -Seconds 1
             if (Test-PortInUse -Port $script:Port) {
                 return $true
+            }
+            # Check log for GitHub device auth code (only show once)
+            if (-not $authCodeShown -and (Test-Path $script:LogFile)) {
+                try {
+                    $stream = [System.IO.FileStream]::new($script:LogFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    if ($stream.Length -gt $logFileSize) {
+                        $stream.Position = $logFileSize
+                        $reader = [System.IO.StreamReader]::new($stream)
+                        $newContent = $reader.ReadToEnd()
+                        $reader.Close()
+                        if ($newContent -match 'enter the code "([^"]+)" in (https://[^\s]+)') {
+                            Write-Host ""
+                            Write-Host "  ============================================" -ForegroundColor Yellow
+                            Write-Host "  GitHub 设备授权码: $($Matches[1])" -ForegroundColor Yellow
+                            Write-Host "  请在浏览器中打开: $($Matches[2])" -ForegroundColor Yellow
+                            Write-Host "  ============================================" -ForegroundColor Yellow
+                            Write-Host ""
+                            $authCodeShown = $true
+                        }
+                    } else {
+                        $stream.Close()
+                    }
+                } catch {}
             }
             $attempt++
         }
@@ -519,12 +549,13 @@ function Set-EnvironmentVariables {
     Write-Host "将设置以下环境变量（用户级）：" -ForegroundColor White
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL = $script:ServiceUrl"
+    Write-Host "  ANTHROPIC_AUTH_TOKEN = dummy"
     Write-Host "  ANTHROPIC_MODEL = $SonnetModel"
     Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL = $OpusModel"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL = $SonnetModel"
-    Write-Host "  ANTHROPIC_SMALL_FAST_MODEL = $HaikuModel"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL = $HaikuModel"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1"
+    Write-Host "  DISABLE_TELEMETRY = 1"
     Write-Host ""
     Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
     Write-Host ""
@@ -541,6 +572,8 @@ function Set-EnvironmentVariables {
     try {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
         Write-Success "ANTHROPIC_BASE_URL"
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
+        Write-Success "ANTHROPIC_AUTH_TOKEN"
 
         [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $SonnetModel, "User")
         Write-Success "ANTHROPIC_MODEL"
@@ -551,14 +584,14 @@ function Set-EnvironmentVariables {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $SonnetModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_SONNET_MODEL"
 
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_SMALL_FAST_MODEL", $HaikuModel, "User")
-        Write-Success "ANTHROPIC_SMALL_FAST_MODEL"
-
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $HaikuModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_HAIKU_MODEL"
 
         [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
         Write-Success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+
+        [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
+        Write-Success "DISABLE_TELEMETRY"
 
         Write-Host ""
         Write-Title "✓ 环境变量设置完成！"
@@ -607,9 +640,10 @@ function Remove-EnvironmentVariables {
     Write-Host "  ANTHROPIC_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL"
-    Write-Host "  ANTHROPIC_SMALL_FAST_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
+    Write-Host "  ANTHROPIC_AUTH_TOKEN"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    Write-Host "  DISABLE_TELEMETRY"
     Write-Host ""
     Write-Host "清除后，Claude Code 将恢复使用 Anthropic 官方 API" -ForegroundColor Yellow
     Write-Host ""
@@ -628,9 +662,10 @@ function Remove-EnvironmentVariables {
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_SMALL_FAST_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "DISABLE_TELEMETRY"
     )
 
     # Use registry to completely remove environment variables (key + value)
@@ -763,18 +798,48 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
         Start-Sleep -Milliseconds 500
         Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
 
+        # Record log file size before starting, so we only scan new content
+        $logFileSize = 0
+        if (Test-Path $script:LogFile) {
+            $logFileSize = (Get-Item $script:LogFile).Length
+        }
+
         Write-Info "等待服务启动..."
 
-        # 多次尝试检测端口（最多 30 秒，首次启动可能需要下载）
-        $maxAttempts = 30
+        # 多次尝试检测端口（最多 90 秒，首次启动可能需要下载和设备授权）
+        $maxAttempts = 90
         $attempt = 0
         $serviceStarted = $false
+        $authCodeShown = $false
 
         while ($attempt -lt $maxAttempts) {
             Start-Sleep -Seconds 1
             if (Test-PortInUse -Port $script:Port) {
                 $serviceStarted = $true
                 break
+            }
+            # Check log for GitHub device auth code (only show once)
+            if (-not $authCodeShown -and (Test-Path $script:LogFile)) {
+                try {
+                    $stream = [System.IO.FileStream]::new($script:LogFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                    if ($stream.Length -gt $logFileSize) {
+                        $stream.Position = $logFileSize
+                        $reader = [System.IO.StreamReader]::new($stream)
+                        $newContent = $reader.ReadToEnd()
+                        $reader.Close()
+                        if ($newContent -match 'enter the code "([^"]+)" in (https://[^\s]+)') {
+                            Write-Host ""
+                            Write-Host "  ============================================" -ForegroundColor Yellow
+                            Write-Host "  GitHub 设备授权码: $($Matches[1])" -ForegroundColor Yellow
+                            Write-Host "  请在浏览器中打开: $($Matches[2])" -ForegroundColor Yellow
+                            Write-Host "  ============================================" -ForegroundColor Yellow
+                            Write-Host ""
+                            $authCodeShown = $true
+                        }
+                    } else {
+                        $stream.Close()
+                    }
+                } catch {}
             }
             $attempt++
             if ($attempt % 3 -eq 0) {
@@ -1035,6 +1100,12 @@ function Invoke-QuickStart {
         Write-Host ""
 
         try {
+            # Record log file size before starting, so we only scan new content
+            $logFileSize = 0
+            if (Test-Path $script:LogFile) {
+                $logFileSize = (Get-Item $script:LogFile).Length
+            }
+
             $vbsScript = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$script:WorkDir"
@@ -1046,15 +1117,39 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
             Start-Sleep -Milliseconds 500
             Remove-Item $vbsFile -Force -ErrorAction SilentlyContinue
 
-            $maxAttempts = 30
+            $maxAttempts = 90
             $attempt = 0
             $serviceStarted = $false
+            $authCodeShown = $false
 
             while ($attempt -lt $maxAttempts) {
                 Start-Sleep -Seconds 1
                 if (Test-PortInUse -Port $script:Port) {
                     $serviceStarted = $true
                     break
+                }
+                # Check log for GitHub device auth code (only show once)
+                if (-not $authCodeShown -and (Test-Path $script:LogFile)) {
+                    try {
+                        $stream = [System.IO.FileStream]::new($script:LogFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                        if ($stream.Length -gt $logFileSize) {
+                            $stream.Position = $logFileSize
+                            $reader = [System.IO.StreamReader]::new($stream)
+                            $newContent = $reader.ReadToEnd()
+                            $reader.Close()
+                            if ($newContent -match 'enter the code "([^"]+)" in (https://[^\s]+)') {
+                                Write-Host ""
+                                Write-Host "  ============================================" -ForegroundColor Yellow
+                                Write-Host "  GitHub 设备授权码: $($Matches[1])" -ForegroundColor Yellow
+                                Write-Host "  请在浏览器中打开: $($Matches[2])" -ForegroundColor Yellow
+                                Write-Host "  ============================================" -ForegroundColor Yellow
+                                Write-Host ""
+                                $authCodeShown = $true
+                            }
+                        } else {
+                            $stream.Close()
+                        }
+                    } catch {}
                 }
                 $attempt++
             }
@@ -1109,12 +1204,12 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
         [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $sonnetModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $opusModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_SMALL_FAST_MODEL", $haikuModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
         [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
+        [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
 
         # Remove deprecated vars
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", $null, "User")
+        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
         [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", $null, "User")
 
         Write-Success "环境变量配置完成"
