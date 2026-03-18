@@ -422,7 +422,7 @@ function Invoke-ToggleAutostart {
                 Write-Error "取消开机自启失败"
             }
         } else {
-            Write-Info "已取消操作"
+            Write-Info "操作已放弃，开机自启保持启用"
         }
     } else {
         Write-Host ""
@@ -439,7 +439,7 @@ function Invoke-ToggleAutostart {
                 Write-Error "注册开机自启失败"
             }
         } else {
-            Write-Info "已取消操作"
+            Write-Info "操作已放弃，开机自启保持关闭"
         }
     }
 }
