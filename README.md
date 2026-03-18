@@ -55,6 +55,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | 4 | 配置环境变量 |
 | 5 | 清除环境变量 |
 | 6 | 一键配置并启动（推荐首次使用） |
+| 7 | 开机自启（注册/取消） |
 | 0 | 退出 |
 
 ## 🤖 模型选择
@@ -118,8 +119,10 @@ copilot-api-manager/
 
 **自动生成的文件（已在 .gitignore 中忽略）：**
 - `copilot-watchdog.sh` / `copilot-watchdog.ps1` — 守护进程脚本
+- `copilot-autostart.ps1` — 开机自启引导脚本
 - `copilot-api.log` — 服务运行日志
 - `watchdog.log` — 守护进程日志
+- `autostart.log` — 开机自启日志
 
 ## ❤️ 致谢
 

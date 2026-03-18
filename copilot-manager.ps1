@@ -367,6 +367,83 @@ function Get-ServiceProcess {
     return $null
 }
 
+function Get-AutostartVbsPath {
+    return Join-Path ([Environment]::GetFolderPath("Startup")) "copilot-autostart.vbs"
+}
+
+function Test-AutostartRegistered {
+    return Test-Path (Get-AutostartVbsPath)
+}
+
+function Register-Autostart {
+    $autostartScript = Join-Path $script:WorkDir "copilot-autostart.ps1"
+    if (-not (Test-Path $autostartScript)) {
+        Write-Error "找不到自启脚本: $autostartScript"
+        return $false
+    }
+
+    $vbsPath = Get-AutostartVbsPath
+    $vbsContent = "Set WshShell = CreateObject(""WScript.Shell"")" + [Environment]::NewLine
+    $vbsContent += "WshShell.Run ""powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """"$autostartScript"""""", 0, False"
+
+    try {
+        $vbsContent | Out-File -FilePath $vbsPath -Encoding ASCII -Force
+        return $true
+    } catch {
+        Write-Error "写入 VBS 文件失败: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Unregister-Autostart {
+    $vbsPath = Get-AutostartVbsPath
+    if (Test-Path $vbsPath) {
+        try {
+            Remove-Item $vbsPath -Force
+            return $true
+        } catch {
+            Write-Error "删除 VBS 文件失败: $($_.Exception.Message)"
+            return $false
+        }
+    }
+    return $true
+}
+
+function Invoke-ToggleAutostart {
+    if (Test-AutostartRegistered) {
+        Write-Host ""
+        Write-Info "当前状态: 已注册开机自启"
+        Write-Host ""
+        $confirm = Read-Host "确认取消开机自启? (Y/N)"
+        if ($confirm -eq 'Y' -or $confirm -eq 'y') {
+            if (Unregister-Autostart) {
+                Write-Success "已取消开机自启"
+            } else {
+                Write-Error "取消开机自启失败"
+            }
+        } else {
+            Write-Info "已取消操作"
+        }
+    } else {
+        Write-Host ""
+        Write-Info "当前状态: 未注册开机自启"
+        Write-Host "  注册后，系统启动时将自动启动 Copilot API 服务和守护进程" -ForegroundColor Gray
+        Write-Host ""
+        $confirm = Read-Host "确认注册开机自启? (Y/N)"
+        if ($confirm -eq 'Y' -or $confirm -eq 'y') {
+            if (Register-Autostart) {
+                Write-Success "已注册开机自启"
+                $vbsPath = Get-AutostartVbsPath
+                Write-Host "  VBS 文件: $vbsPath" -ForegroundColor Gray
+            } else {
+                Write-Error "注册开机自启失败"
+            }
+        } else {
+            Write-Info "已取消操作"
+        }
+    }
+}
+
 function Get-AvailableModels {
     # Fetch available models from the API
     try {
@@ -1276,11 +1353,13 @@ function Show-MainMenu {
         Write-Host ""
         Write-Host "  [快捷操作]" -ForegroundColor Yellow
         Write-Host "  6. 一键配置并启动" -ForegroundColor Cyan
+        $autostartStatus = if (Test-AutostartRegistered) { "已启用" } else { "未启用" }
+        Write-Host "  7. 开机自启 ($autostartStatus)" -ForegroundColor White
         Write-Host "  0. 退出" -ForegroundColor Gray
         Write-Host ""
         Write-Host "======================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "请选择操作 (0-6)"
+        $choice = Read-Host "请选择操作 (0-7)"
 
         switch ($choice) {
             "1" {
@@ -1305,6 +1384,10 @@ function Show-MainMenu {
             }
             "6" {
                 Invoke-QuickStart
+                Read-Host "按 Enter 继续"
+            }
+            "7" {
+                Invoke-ToggleAutostart
                 Read-Host "按 Enter 继续"
             }
             "0" {
