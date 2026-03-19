@@ -1,2 +1,6 @@
 # Logs
 *.log
+
+# Auto-generated scripts
+copilot-watchdog.ps1
+copilot-watchdog.sh
