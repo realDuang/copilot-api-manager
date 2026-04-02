@@ -300,6 +300,10 @@ start_watchdog_internal() {
 # Copilot API Watchdog Script
 # Auto-generated - do not modify directly
 
+# Load nvm so that node/npx are available (launchd doesn't source .zshrc)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+
 WATCHDOG_PORT="__PORT__"
 WATCHDOG_WORK_DIR="__WORK_DIR__"
 WATCHDOG_LOG_FILE="__WATCHDOG_LOG_FILE__"
@@ -918,6 +922,16 @@ show_service_status() {
         echo "  状态:      ${YELLOW}[×] 守护进程未运行${NC}"
     fi
     
+    # Autostart status
+    echo ""
+    echo "${CYAN}[开机自启]${NC}"
+    if test_autostart_registered; then
+        echo "  状态:      ${GREEN}[✓] 已启用${NC}"
+        echo "  plist:     ${LAUNCHD_PLIST_PATH}"
+    else
+        echo "  状态:      ${YELLOW}[×] 未启用${NC}"
+    fi
+
     echo ""
     echo "${CYAN}[其他信息]${NC}"
     echo "  工作目录: ${WORK_DIR}"
@@ -1122,6 +1136,115 @@ invoke_quick_start() {
     echo ""
 }
 
+# ==================== Autostart Functions ====================
+
+LAUNCHD_LABEL="com.copilot-api.autostart"
+LAUNCHD_PLIST_PATH="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+AUTOSTART_SCRIPT="${WORK_DIR}/copilot-autostart.sh"
+
+test_autostart_registered() {
+    [[ -f "${LAUNCHD_PLIST_PATH}" ]]
+}
+
+register_autostart() {
+    if [[ ! -f "${AUTOSTART_SCRIPT}" ]]; then
+        write_error "找不到自启脚本: ${AUTOSTART_SCRIPT}"
+        return 1
+    fi
+
+    chmod +x "${AUTOSTART_SCRIPT}"
+
+    # Ensure LaunchAgents directory exists
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cat > "${LAUNCHD_PLIST_PATH}" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>${AUTOSTART_SCRIPT}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${WORK_DIR}/autostart.log</string>
+    <key>StandardErrorPath</key>
+    <string>${WORK_DIR}/autostart.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    if [[ $? -eq 0 ]]; then
+        return 0
+    else
+        write_error "写入 plist 文件失败"
+        return 1
+    fi
+}
+
+unregister_autostart() {
+    if [[ -f "${LAUNCHD_PLIST_PATH}" ]]; then
+        # Unload from launchd first (ignore errors if not loaded)
+        launchctl bootout "gui/$(id -u)" "${LAUNCHD_PLIST_PATH}" 2>/dev/null || true
+        rm -f "${LAUNCHD_PLIST_PATH}"
+        if [[ $? -eq 0 ]]; then
+            return 0
+        else
+            write_error "删除 plist 文件失败"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+invoke_toggle_autostart() {
+    if test_autostart_registered; then
+        echo ""
+        write_info "当前状态: 已注册开机自启"
+        echo ""
+        echo -n "确认取消开机自启? (Y/N): "
+        read confirm
+        if [[ "$confirm" == "Y" || "$confirm" == "y" ]]; then
+            if unregister_autostart; then
+                write_success "已取消开机自启"
+            else
+                write_error "取消开机自启失败"
+            fi
+        else
+            write_info "操作已放弃，开机自启保持启用"
+        fi
+    else
+        echo ""
+        write_info "当前状态: 未注册开机自启"
+        echo "  注册后，系统登录时将自动启动 Copilot API 服务和守护进程"
+        echo ""
+        echo -n "确认注册开机自启? (Y/N): "
+        read confirm
+        if [[ "$confirm" == "Y" || "$confirm" == "y" ]]; then
+            if register_autostart; then
+                write_success "已注册开机自启"
+                echo "  plist 文件: ${LAUNCHD_PLIST_PATH}"
+            else
+                write_error "注册开机自启失败"
+            fi
+        else
+            write_info "操作已放弃，开机自启保持关闭"
+        fi
+    fi
+}
+
+# ==================== Main Menu ====================
+
 show_main_menu() {
     detect_shell_config
     
@@ -1143,11 +1266,18 @@ show_main_menu() {
         echo ""
         echo "  ${YELLOW}[快捷操作]${NC}"
         echo "  ${CYAN}6. 一键配置并启动${NC}"
+        local autostart_status
+        if test_autostart_registered; then
+            autostart_status="已启用"
+        else
+            autostart_status="未启用"
+        fi
+        echo "  ${WHITE}7. 开机自启 (${autostart_status})${NC}"
         echo "  0. 退出"
         echo ""
         echo "${CYAN}======================================${NC}"
         
-        echo -n "请选择操作 (0-6): "
+        echo -n "请选择操作 (0-7): "
         read choice
         
         case "$choice" in
@@ -1178,6 +1308,11 @@ show_main_menu() {
                 ;;
             6)
                 invoke_quick_start
+                echo -n "按 Enter 继续..."
+                read
+                ;;
+            7)
+                invoke_toggle_autostart
                 echo -n "按 Enter 继续..."
                 read
                 ;;
