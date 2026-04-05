@@ -113,13 +113,14 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 copilot-api-manager/
 ├── copilot-manager.sh          # macOS/Linux 管理脚本
 ├── copilot-manager.ps1         # Windows 管理脚本
+├── copilot-autostart.sh        # macOS 开机自启引导脚本
+├── copilot-autostart.ps1       # Windows 开机自启引导脚本
 ├── .gitignore                  # 排除日志和自动生成的脚本
 └── README.md                   # 本文件
 ```
 
 **自动生成的文件（已在 .gitignore 中忽略）：**
 - `copilot-watchdog.sh` / `copilot-watchdog.ps1` — 守护进程脚本
-- `copilot-autostart.ps1` — 开机自启引导脚本
 - `copilot-api.log` — 服务运行日志
 - `watchdog.log` — 守护进程日志
 - `autostart.log` — 开机自启日志
