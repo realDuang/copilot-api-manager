@@ -1180,6 +1180,8 @@ register_autostart() {
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
     </dict>
+    <key>AbandonProcessGroup</key>
+    <true/>
 </dict>
 </plist>
 EOF

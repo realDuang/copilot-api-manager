@@ -53,7 +53,7 @@ if ! test_port_in_use; then
     for i in $(seq 1 $max_retries); do
         log "Starting service (attempt ${i}/${max_retries})..."
         cd "${WORK_DIR}"
-        nohup npx -y copilot-api@latest start --port ${PORT} >> "${SERVICE_LOG}" 2>&1 &
+        nohup npx -y @jeffreycao/copilot-api@latest start --port ${PORT} >> "${SERVICE_LOG}" 2>&1 &
 
         # Wait up to 30 seconds for port to open
         for attempt in $(seq 1 30); do
