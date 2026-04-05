@@ -244,7 +244,7 @@ start_service_internal() {
         log_size=$(wc -c < "${LOG_FILE}" | tr -d ' ')
     fi
 
-    nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
+    nohup npx -y @jeffreycao/copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
 
     # Wait for service to start (max 90 seconds, extended for device auth flow)
     local max_attempts=90
@@ -342,7 +342,7 @@ test_health() {
 start_service() {
     write_log "Starting service..." "INFO"
     cd "${WATCHDOG_WORK_DIR}"
-    nohup npx -y copilot-api@latest start --port ${WATCHDOG_PORT} >> "${WATCHDOG_SERVICE_LOG}" 2>&1 &
+    nohup npx -y @jeffreycao/copilot-api@latest start --port ${WATCHDOG_PORT} >> "${WATCHDOG_SERVICE_LOG}" 2>&1 &
 
     local max_attempts=30
     local attempt=0
@@ -713,7 +713,7 @@ start_copilot_service() {
     fi
     
     write_info "[2/4] 检查 copilot-api 包..."
-    if npx -y copilot-api@latest --version &> /dev/null; then
+    if npx -y @jeffreycao/copilot-api@latest --version &> /dev/null; then
         write_success "copilot-api 已就绪"
     else
         write_warning "无法验证 copilot-api 状态，将尝试继续"
@@ -748,7 +748,7 @@ start_copilot_service() {
     fi
 
     # Start service in background, log to file only
-    nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
+    nohup npx -y @jeffreycao/copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
     
     local max_attempts=90
     local attempt=0
@@ -999,7 +999,7 @@ invoke_quick_start() {
         fi
 
         # Start service in background, log to file only
-        nohup npx -y copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
+        nohup npx -y @jeffreycao/copilot-api@latest start --port ${PORT} >> "${LOG_FILE}" 2>&1 &
         
         local max_attempts=90
         local attempt=0
