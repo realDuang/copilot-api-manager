@@ -21,6 +21,42 @@ detect_shell_config() {
     fi
 }
 
+# Ensure node/npx are available by loading common version managers
+ensure_node_env() {
+    command -v node &> /dev/null && return 0
+
+    # nvm
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+        . "$NVM_DIR/nvm.sh"
+        command -v node &> /dev/null && return 0
+    fi
+
+    # fnm
+    if [[ -d "$HOME/.local/share/fnm" ]]; then
+        export PATH="$HOME/.local/share/fnm:$PATH"
+        eval "$(fnm env 2>/dev/null)" 2>/dev/null
+        command -v node &> /dev/null && return 0
+    fi
+
+    # volta
+    if [[ -d "$HOME/.volta" ]]; then
+        export VOLTA_HOME="$HOME/.volta"
+        export PATH="$VOLTA_HOME/bin:$PATH"
+        command -v node &> /dev/null && return 0
+    fi
+
+    # Homebrew node (Apple Silicon / Intel)
+    for prefix in /opt/homebrew /usr/local; do
+        if [[ -x "$prefix/bin/node" ]]; then
+            export PATH="$prefix/bin:$PATH"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -300,9 +336,38 @@ start_watchdog_internal() {
 # Copilot API Watchdog Script
 # Auto-generated - do not modify directly
 
-# Load nvm so that node/npx are available (launchd doesn't source .zshrc)
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# Ensure node/npx are available by loading common version managers
+ensure_node_env() {
+    command -v node &> /dev/null && return 0
+
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+        . "$NVM_DIR/nvm.sh"
+        command -v node &> /dev/null && return 0
+    fi
+
+    if [[ -d "$HOME/.local/share/fnm" ]]; then
+        export PATH="$HOME/.local/share/fnm:$PATH"
+        eval "$(fnm env 2>/dev/null)" 2>/dev/null
+        command -v node &> /dev/null && return 0
+    fi
+
+    if [[ -d "$HOME/.volta" ]]; then
+        export VOLTA_HOME="$HOME/.volta"
+        export PATH="$VOLTA_HOME/bin:$PATH"
+        command -v node &> /dev/null && return 0
+    fi
+
+    for prefix in /opt/homebrew /usr/local; do
+        if [[ -x "$prefix/bin/node" ]]; then
+            export PATH="$prefix/bin:$PATH"
+            return 0
+        fi
+    done
+
+    return 1
+}
+ensure_node_env
 
 WATCHDOG_PORT="__PORT__"
 WATCHDOG_WORK_DIR="__WORK_DIR__"
@@ -702,6 +767,7 @@ start_copilot_service() {
     write_title "启动 Copilot API 服务"
     
     write_info "[1/4] 检查 Node.js..."
+    ensure_node_env
     if command -v node &> /dev/null; then
         local node_version=$(node --version)
         write_success "Node.js ${node_version}"
@@ -852,6 +918,7 @@ show_service_status() {
     write_title "Copilot API 服务状态检查"
     
     echo "${CYAN}[检查环境]${NC}"
+    ensure_node_env
     if command -v node &> /dev/null; then
         local node_version=$(node --version)
         echo "  Node.js: ${GREEN}[✓] ${node_version}${NC}"
@@ -981,6 +1048,7 @@ invoke_quick_start() {
     write_info "[步骤 1/3] 检查服务..."
     
     if ! test_port_in_use ${PORT}; then
+        ensure_node_env
         if ! command -v node &> /dev/null; then
             write_error "未找到 Node.js，请先安装 Node.js"
             return

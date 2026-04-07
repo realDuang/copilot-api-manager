@@ -9,9 +9,38 @@ SERVICE_URL="http://localhost:${PORT}"
 SERVICE_LOG="${WORK_DIR}/copilot-api.log"
 WATCHDOG_SCRIPT="${WORK_DIR}/copilot-watchdog.sh"
 
-# Load nvm so that node/npx are available (launchd doesn't source .zshrc)
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+# Ensure node/npx are available by loading common version managers
+ensure_node_env() {
+    command -v node &> /dev/null && return 0
+
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+        . "$NVM_DIR/nvm.sh"
+        command -v node &> /dev/null && return 0
+    fi
+
+    if [[ -d "$HOME/.local/share/fnm" ]]; then
+        export PATH="$HOME/.local/share/fnm:$PATH"
+        eval "$(fnm env 2>/dev/null)" 2>/dev/null
+        command -v node &> /dev/null && return 0
+    fi
+
+    if [[ -d "$HOME/.volta" ]]; then
+        export VOLTA_HOME="$HOME/.volta"
+        export PATH="$VOLTA_HOME/bin:$PATH"
+        command -v node &> /dev/null && return 0
+    fi
+
+    for prefix in /opt/homebrew /usr/local; do
+        if [[ -x "$prefix/bin/node" ]]; then
+            export PATH="$prefix/bin:$PATH"
+            return 0
+        fi
+    done
+
+    return 1
+}
+ensure_node_env
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "${LOG_FILE}" 2>/dev/null
