@@ -627,7 +627,6 @@ function Set-EnvironmentVariables {
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL = $script:ServiceUrl"
     Write-Host "  ANTHROPIC_AUTH_TOKEN = dummy"
-    Write-Host "  ANTHROPIC_MODEL = $SonnetModel"
     Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL = $OpusModel"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL = $SonnetModel"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL = $HaikuModel"
@@ -635,6 +634,16 @@ function Set-EnvironmentVariables {
     Write-Host "  DISABLE_TELEMETRY = 1"
     Write-Host ""
     Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
+    Write-Host ""
+
+    $codexConfirm = Read-Host "是否同时配置 Codex CLI 环境变量? (Y/N)"
+    $configCodex = ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y')
+    if ($configCodex) {
+        Write-Host ""
+        Write-Host "  [Codex CLI]" -ForegroundColor Yellow
+        Write-Host "  OPENAI_BASE_URL = $script:ServiceUrl/v1"
+        Write-Host "  OPENAI_API_KEY = dummy"
+    }
     Write-Host ""
 
     $confirm = Read-Host "确认设置全局环境变量? (Y/N)"
@@ -652,9 +661,6 @@ function Set-EnvironmentVariables {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
         Write-Success "ANTHROPIC_AUTH_TOKEN"
 
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $SonnetModel, "User")
-        Write-Success "ANTHROPIC_MODEL"
-
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $OpusModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_OPUS_MODEL"
 
@@ -669,6 +675,15 @@ function Set-EnvironmentVariables {
 
         [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
         Write-Success "DISABLE_TELEMETRY"
+
+        if ($configCodex) {
+            Write-Host ""
+            Write-Host "[设置 Codex CLI 环境变量]" -ForegroundColor Cyan
+            [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "$script:ServiceUrl/v1", "User")
+            Write-Success "OPENAI_BASE_URL"
+            [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
+            Write-Success "OPENAI_API_KEY"
+        }
 
         Write-Host ""
         Write-Title "✓ 环境变量设置完成！"
@@ -713,8 +728,8 @@ function Remove-EnvironmentVariables {
 
     Write-Host "此操作将删除以下环境变量：" -ForegroundColor White
     Write-Host ""
+    Write-Host "  [Claude Code]" -ForegroundColor Yellow
     Write-Host "  ANTHROPIC_BASE_URL"
-    Write-Host "  ANTHROPIC_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
@@ -722,7 +737,11 @@ function Remove-EnvironmentVariables {
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     Write-Host "  DISABLE_TELEMETRY"
     Write-Host ""
-    Write-Host "清除后，Claude Code 将恢复使用 Anthropic 官方 API" -ForegroundColor Yellow
+    Write-Host "  [Codex CLI]" -ForegroundColor Yellow
+    Write-Host "  OPENAI_BASE_URL"
+    Write-Host "  OPENAI_API_KEY"
+    Write-Host ""
+    Write-Host "清除后，Claude Code / Codex CLI 将恢复使用官方 API" -ForegroundColor Yellow
     Write-Host ""
 
     $confirm = Read-Host "确认清除全局环境变量? (Y/N)"
@@ -736,13 +755,14 @@ function Remove-EnvironmentVariables {
 
     $variables = @(
         "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "DISABLE_TELEMETRY"
+        "DISABLE_TELEMETRY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY"
     )
 
     # Use registry to completely remove environment variables (key + value)
@@ -1067,7 +1087,7 @@ function Show-ServiceStatus {
     Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
 
     $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" } |
+        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" -or $_ -eq "OPENAI_BASE_URL" -or $_ -eq "OPENAI_API_KEY" } |
         Sort-Object
 
     if ($envVarNames.Count -gt 0) {
@@ -1278,7 +1298,6 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
 
     try {
         [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_MODEL", $sonnetModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $opusModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
@@ -1290,6 +1309,18 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
         [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", $null, "User")
 
         Write-Success "环境变量配置完成"
+
+        # Codex CLI configuration
+        Write-Host ""
+        $codexConfirm = Read-Host "是否同时配置 Codex CLI 环境变量? (Y/N)"
+        if ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y') {
+            Write-Host ""
+            Write-Host "[设置 Codex CLI 环境变量]" -ForegroundColor Cyan
+            [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "$script:ServiceUrl/v1", "User")
+            Write-Success "OPENAI_BASE_URL"
+            [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
+            Write-Success "OPENAI_API_KEY"
+        }
     }
     catch {
         Write-Error "配置环境变量失败: $_"

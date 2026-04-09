@@ -602,6 +602,32 @@ remove_env_from_shell_config() {
     fi
 }
 
+ask_codex_config() {
+    echo ""
+    echo "${YELLOW}是否同时配置 Codex CLI 环境变量？${NC}"
+    echo "  配置后 OpenAI Codex CLI 也将通过 Copilot API 代理"
+    echo ""
+    echo -n "配置 Codex CLI？(Y/N): "
+    read codex_confirm
+    if [[ "$codex_confirm" == "Y" || "$codex_confirm" == "y" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+set_codex_environment_variables() {
+    echo ""
+    echo "${CYAN}[设置 Codex CLI 环境变量]${NC}"
+
+    add_env_to_shell_config "OPENAI_BASE_URL" "${SERVICE_URL}/v1"
+    write_success "OPENAI_BASE_URL"
+    add_env_to_shell_config "OPENAI_API_KEY" "dummy"
+    write_success "OPENAI_API_KEY"
+
+    export OPENAI_BASE_URL="${SERVICE_URL}/v1"
+    export OPENAI_API_KEY="dummy"
+}
+
 set_environment_variables() {
     local opus_model="$1"
     local sonnet_model="$2"
@@ -612,7 +638,6 @@ set_environment_variables() {
     echo ""
     echo "  ANTHROPIC_BASE_URL = ${SERVICE_URL}"
     echo "  ANTHROPIC_AUTH_TOKEN = dummy"
-    echo "  ANTHROPIC_MODEL = ${sonnet_model}"
     echo "  ANTHROPIC_DEFAULT_OPUS_MODEL = ${opus_model}"
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL = ${sonnet_model}"
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL = ${haiku_model}"
@@ -637,10 +662,7 @@ set_environment_variables() {
     write_success "ANTHROPIC_BASE_URL"
     add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"
     write_success "ANTHROPIC_AUTH_TOKEN"
-    
-    add_env_to_shell_config "ANTHROPIC_MODEL" "${sonnet_model}"
-    write_success "ANTHROPIC_MODEL"
-    
+
     add_env_to_shell_config "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
     write_success "ANTHROPIC_DEFAULT_OPUS_MODEL"
     
@@ -658,12 +680,16 @@ set_environment_variables() {
     
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
     export ANTHROPIC_AUTH_TOKEN="dummy"
-    export ANTHROPIC_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
     export DISABLE_TELEMETRY="1"
+
+    # Codex CLI configuration
+    if ask_codex_config; then
+        set_codex_environment_variables
+    fi
     
     echo ""
     write_title "✓ 环境变量设置完成！"
@@ -702,8 +728,8 @@ remove_environment_variables() {
     
     echo "${WHITE}此操作将删除以下环境变量：${NC}"
     echo ""
+    echo "  ${YELLOW}[Claude Code]${NC}"
     echo "  ANTHROPIC_BASE_URL"
-    echo "  ANTHROPIC_MODEL"
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     echo "  ANTHROPIC_DEFAULT_OPUS_MODEL"
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
@@ -711,7 +737,11 @@ remove_environment_variables() {
     echo "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
     echo "  DISABLE_TELEMETRY"
     echo ""
-    echo "${YELLOW}清除后，Claude Code 将恢复使用 Anthropic 官方 API${NC}"
+    echo "  ${YELLOW}[Codex CLI]${NC}"
+    echo "  OPENAI_BASE_URL"
+    echo "  OPENAI_API_KEY"
+    echo ""
+    echo "${YELLOW}清除后，Claude Code / Codex CLI 将恢复使用官方 API${NC}"
     echo ""
     
     echo -n "确认清除环境变量？(Y/N): "
@@ -726,13 +756,14 @@ remove_environment_variables() {
     
     local variables=(
         "ANTHROPIC_BASE_URL"
-        "ANTHROPIC_MODEL"
         "ANTHROPIC_DEFAULT_SONNET_MODEL"
         "ANTHROPIC_DEFAULT_OPUS_MODEL"
         "ANTHROPIC_DEFAULT_HAIKU_MODEL"
         "ANTHROPIC_AUTH_TOKEN"
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
         "DISABLE_TELEMETRY"
+        "OPENAI_BASE_URL"
+        "OPENAI_API_KEY"
     )
     
     for var in "${variables[@]}"; do
@@ -964,6 +995,16 @@ show_service_status() {
                 echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
             fi
         done < <(grep "^export ANTHROPIC_\|^export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=" "$SHELL_CONFIG")
+
+        # Codex CLI env vars
+        while IFS= read -r line; do
+            local var_name=$(echo "$line" | sed 's/^export \([^=]*\)=.*/\1/')
+            local var_value=$(echo "$line" | cut -d'"' -f2)
+            if [[ -n "$var_name" && -n "$var_value" ]]; then
+                found_any=true
+                echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
+            fi
+        done < <(grep "^export OPENAI_BASE_URL=\|^export OPENAI_API_KEY=" "$SHELL_CONFIG")
         
         if [[ "$found_any" == "false" ]]; then
             echo "  ${RED}[×] 未配置任何环境变量${NC}"
@@ -1144,7 +1185,6 @@ invoke_quick_start() {
     echo ""
     
     add_env_to_shell_config "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
-    add_env_to_shell_config "ANTHROPIC_MODEL" "${sonnet_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
@@ -1152,7 +1192,6 @@ invoke_quick_start() {
     add_env_to_shell_config "DISABLE_TELEMETRY" "1"
     
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
-    export ANTHROPIC_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
@@ -1167,6 +1206,11 @@ invoke_quick_start() {
     unset DISABLE_NON_ESSENTIAL_MODEL_CALLS 2>/dev/null
     
     write_success "环境变量配置完成"
+
+    # Codex CLI configuration
+    if ask_codex_config; then
+        set_codex_environment_variables
+    fi
     
     # Restart service to apply new env vars
     write_info "正在重启服务以应用新配置..."

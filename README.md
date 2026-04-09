@@ -2,7 +2,7 @@
 
 [![Upstream Project](https://img.shields.io/badge/upstream-copilot--api-blue)](https://github.com/nicepkg/copilot-api)
 
-一个管理工具，允许您通过 GitHub Copilot 订阅代理 Claude Code 请求，从而无需单独的 Anthropic API 密钥。
+一个管理工具，允许您通过 GitHub Copilot 订阅代理 Claude Code 和 OpenAI Codex CLI 请求，从而无需单独的 API 密钥。
 
 ## 🚀 功能特点
 
@@ -86,6 +86,8 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | `ANTHROPIC_SMALL_FAST_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要流量 | `1` |
+| `OPENAI_BASE_URL` | Codex CLI 代理地址（可选） | `http://localhost:4141/v1` |
+| `OPENAI_API_KEY` | Codex CLI API Key（可选） | `dummy` |
 
 > **注意**：以上示例值仅供参考，实际可选模型由 API 实时返回。脚本会自动过滤过时版本，请从列表中选择最新可用模型。
 
