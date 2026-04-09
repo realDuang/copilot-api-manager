@@ -615,6 +615,71 @@ function Show-ModelSelectionMenu {
     return "$opusModel|$sonnetModel|$haikuModel"
 }
 
+$script:CodexConfigDir = Join-Path $env:USERPROFILE ".codex"
+$script:CodexConfigFile = Join-Path $script:CodexConfigDir "config.toml"
+$script:CodexMarkerBegin = "# --- copilot-api-manager codex config begin ---"
+$script:CodexMarkerEnd = "# --- copilot-api-manager codex config end ---"
+
+function Set-CodexConfig {
+    $configDir = $script:CodexConfigDir
+    $configFile = $script:CodexConfigFile
+
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+
+    $providerBlock = @"
+
+$($script:CodexMarkerBegin)
+[model_providers.copilot-proxy]
+name = "Copilot API Proxy"
+base_url = "$script:ServiceUrl/v1"
+env_key = "OPENAI_API_KEY"
+$($script:CodexMarkerEnd)
+"@
+
+    if (Test-Path $configFile) {
+        $content = Get-Content $configFile -Raw
+        # Remove existing managed block
+        $content = $content -replace "(?s)$([regex]::Escape($script:CodexMarkerBegin)).*?$([regex]::Escape($script:CodexMarkerEnd))\r?\n?", ""
+        # Remove existing model_provider = "copilot-proxy"
+        $content = $content -replace '(?m)^model_provider = "copilot-proxy"\r?\n?', ""
+    }
+    else {
+        $content = ""
+    }
+
+    # Insert model_provider at root level (before any [table] section)
+    if ($content -match '(?m)^\[') {
+        $content = $content -replace '(?m)(^\[)', "model_provider = `"copilot-proxy`"`n`n`$1", 1
+    }
+    else {
+        $content = "model_provider = `"copilot-proxy`"`n`n" + $content
+    }
+
+    # Append provider block
+    $content = $content.TrimEnd() + "`n" + $providerBlock + "`n"
+
+    Set-Content -Path $configFile -Value $content -NoNewline
+    Write-Success "~/.codex/config.toml (provider: copilot-proxy)"
+    Write-Host ""
+    Write-Host "提示：建议在 config.toml 中添加以下配置以优化计费：" -ForegroundColor Yellow
+    Write-Host "  [features]" -ForegroundColor White
+    Write-Host "  multi_agent = false" -ForegroundColor White
+}
+
+function Remove-CodexConfig {
+    $configFile = $script:CodexConfigFile
+    if (Test-Path $configFile) {
+        $content = Get-Content $configFile -Raw
+        $content = $content -replace "(?s)$([regex]::Escape($script:CodexMarkerBegin)).*?$([regex]::Escape($script:CodexMarkerEnd))\r?\n?", ""
+        $content = $content -replace '(?m)^model_provider = "copilot-proxy"\r?\n?', ""
+        $content = $content.TrimEnd() + "`n"
+        Set-Content -Path $configFile -Value $content -NoNewline
+        Write-Success "~/.codex/config.toml 已清理 copilot-proxy 配置"
+    }
+}
+
 function Set-EnvironmentVariables {
     param(
         [string]$OpusModel,
@@ -636,13 +701,13 @@ function Set-EnvironmentVariables {
     Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
     Write-Host ""
 
-    $codexConfirm = Read-Host "是否同时配置 Codex CLI 环境变量? (Y/N)"
+    $codexConfirm = Read-Host "是否同时配置 Codex CLI? (Y/N)"
     $configCodex = ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y')
     if ($configCodex) {
         Write-Host ""
         Write-Host "  [Codex CLI]" -ForegroundColor Yellow
-        Write-Host "  OPENAI_BASE_URL = $script:ServiceUrl/v1"
-        Write-Host "  OPENAI_API_KEY = dummy"
+        Write-Host "  OPENAI_API_KEY = dummy (env)"
+        Write-Host "  ~/.codex/config.toml -> copilot-proxy provider"
     }
     Write-Host ""
 
@@ -678,11 +743,10 @@ function Set-EnvironmentVariables {
 
         if ($configCodex) {
             Write-Host ""
-            Write-Host "[设置 Codex CLI 环境变量]" -ForegroundColor Cyan
-            [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "$script:ServiceUrl/v1", "User")
-            Write-Success "OPENAI_BASE_URL"
+            Write-Host "[设置 Codex CLI 配置]" -ForegroundColor Cyan
             [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
-            Write-Success "OPENAI_API_KEY"
+            Write-Success "OPENAI_API_KEY (env)"
+            Set-CodexConfig
         }
 
         Write-Host ""
@@ -738,8 +802,8 @@ function Remove-EnvironmentVariables {
     Write-Host "  DISABLE_TELEMETRY"
     Write-Host ""
     Write-Host "  [Codex CLI]" -ForegroundColor Yellow
-    Write-Host "  OPENAI_BASE_URL"
     Write-Host "  OPENAI_API_KEY"
+    Write-Host "  ~/.codex/config.toml (copilot-proxy provider)"
     Write-Host ""
     Write-Host "清除后，Claude Code / Codex CLI 将恢复使用官方 API" -ForegroundColor Yellow
     Write-Host ""
@@ -761,7 +825,6 @@ function Remove-EnvironmentVariables {
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
         "DISABLE_TELEMETRY",
-        "OPENAI_BASE_URL",
         "OPENAI_API_KEY"
     )
 
@@ -813,6 +876,9 @@ public static extern IntPtr SendMessageTimeout(
     $WM_SETTINGCHANGE = 0x1a
     $result = [UIntPtr]::Zero
     [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+
+    # Clean up Codex CLI config.toml
+    Remove-CodexConfig
 
     Write-Host ""
     Write-Title "✓ 环境变量清除完成！"
@@ -1087,7 +1153,7 @@ function Show-ServiceStatus {
     Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
 
     $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" -or $_ -eq "OPENAI_BASE_URL" -or $_ -eq "OPENAI_API_KEY" } |
+        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" -or $_ -eq "OPENAI_API_KEY" } |
         Sort-Object
 
     if ($envVarNames.Count -gt 0) {
@@ -1100,6 +1166,23 @@ function Show-ServiceStatus {
     else {
         Write-Host "  " -NoNewline
         Write-Host "[×] 未配置任何环境变量" -ForegroundColor Red
+    }
+
+    # Codex CLI config.toml status
+    Write-Host ""
+    Write-Host "[Codex CLI 配置]" -ForegroundColor Cyan
+    if ((Test-Path $script:CodexConfigFile) -and (Select-String -Path $script:CodexConfigFile -Pattern "copilot-proxy" -Quiet)) {
+        Write-Host "  config.toml: " -NoNewline
+        Write-Host "[✓] copilot-proxy provider 已配置" -ForegroundColor Green
+        $baseUrlMatch = Select-String -Path $script:CodexConfigFile -Pattern 'base_url = "(.+)"' | Select-Object -First 1
+        if ($baseUrlMatch) {
+            $baseUrl = $baseUrlMatch.Matches[0].Groups[1].Value
+            Write-Host "  base_url:    $baseUrl" -ForegroundColor Green
+        }
+    }
+    else {
+        Write-Host "  config.toml: " -NoNewline
+        Write-Host "[×] 未配置 (Codex 将使用 OpenAI 官方 API)" -ForegroundColor Yellow
     }
 
     # 守护进程状态
@@ -1312,14 +1395,13 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
 
         # Codex CLI configuration
         Write-Host ""
-        $codexConfirm = Read-Host "是否同时配置 Codex CLI 环境变量? (Y/N)"
+        $codexConfirm = Read-Host "是否同时配置 Codex CLI? (Y/N)"
         if ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y') {
             Write-Host ""
-            Write-Host "[设置 Codex CLI 环境变量]" -ForegroundColor Cyan
-            [Environment]::SetEnvironmentVariable("OPENAI_BASE_URL", "$script:ServiceUrl/v1", "User")
-            Write-Success "OPENAI_BASE_URL"
+            Write-Host "[设置 Codex CLI 配置]" -ForegroundColor Cyan
             [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
-            Write-Success "OPENAI_API_KEY"
+            Write-Success "OPENAI_API_KEY (env)"
+            Set-CodexConfig
         }
     }
     catch {

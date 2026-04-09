@@ -86,10 +86,28 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | `ANTHROPIC_SMALL_FAST_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要流量 | `1` |
-| `OPENAI_BASE_URL` | Codex CLI 代理地址（可选） | `http://localhost:4141/v1` |
 | `OPENAI_API_KEY` | Codex CLI API Key（可选） | `dummy` |
 
 > **注意**：以上示例值仅供参考，实际可选模型由 API 实时返回。脚本会自动过滤过时版本，请从列表中选择最新可用模型。
+
+### Codex CLI 配置
+
+选择配置 Codex CLI 时，脚本会自动创建/更新 `~/.codex/config.toml`，添加自定义 provider 指向 Copilot API 代理：
+
+```toml
+model_provider = "copilot-proxy"
+
+[model_providers.copilot-proxy]
+name = "Copilot API Proxy"
+base_url = "http://localhost:4141/v1"
+env_key = "OPENAI_API_KEY"
+```
+
+> **建议**：使用 Codex 通过 GitHub Copilot 时，建议在 `~/.codex/config.toml` 中禁用 multi-agent 以优化计费：
+> ```toml
+> [features]
+> multi_agent = false
+> ```
 
 **平台差异：**
 - **Windows**：环境变量设置为用户级系统环境变量（通过注册表），需重启终端和 IDE 生效。

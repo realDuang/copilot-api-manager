@@ -604,8 +604,9 @@ remove_env_from_shell_config() {
 
 ask_codex_config() {
     echo ""
-    echo "${YELLOW}是否同时配置 Codex CLI 环境变量？${NC}"
-    echo "  配置后 OpenAI Codex CLI 也将通过 Copilot API 代理"
+    echo "${YELLOW}是否同时配置 Codex CLI？${NC}"
+    echo "  将创建 ~/.codex/config.toml 自定义 provider 指向 Copilot API 代理"
+    echo "  并设置 OPENAI_API_KEY 环境变量以跳过 Codex 登录"
     echo ""
     echo -n "配置 Codex CLI？(Y/N): "
     read codex_confirm
@@ -615,17 +616,75 @@ ask_codex_config() {
     return 1
 }
 
+CODEX_CONFIG_DIR="$HOME/.codex"
+CODEX_CONFIG_FILE="${CODEX_CONFIG_DIR}/config.toml"
+CODEX_PROVIDER_MARKER="# --- copilot-api-manager codex config begin ---"
+CODEX_PROVIDER_MARKER_END="# --- copilot-api-manager codex config end ---"
+
 set_codex_environment_variables() {
     echo ""
-    echo "${CYAN}[设置 Codex CLI 环境变量]${NC}"
+    echo "${CYAN}[设置 Codex CLI 配置]${NC}"
 
-    add_env_to_shell_config "OPENAI_BASE_URL" "${SERVICE_URL}/v1"
-    write_success "OPENAI_BASE_URL"
+    # 1. Set OPENAI_API_KEY env var (referenced by config.toml env_key)
     add_env_to_shell_config "OPENAI_API_KEY" "dummy"
-    write_success "OPENAI_API_KEY"
-
-    export OPENAI_BASE_URL="${SERVICE_URL}/v1"
+    write_success "OPENAI_API_KEY (env)"
     export OPENAI_API_KEY="dummy"
+
+    # 2. Create/update ~/.codex/config.toml
+    mkdir -p "${CODEX_CONFIG_DIR}"
+
+    if [[ -f "${CODEX_CONFIG_FILE}" ]]; then
+        # Remove existing managed block
+        sed -i '' "/${CODEX_PROVIDER_MARKER}/,/${CODEX_PROVIDER_MARKER_END}/d" "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        # Remove any existing model_provider = "copilot-proxy" line
+        sed -i '' '/^model_provider = "copilot-proxy"/d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+    else
+        touch "${CODEX_CONFIG_FILE}"
+    fi
+
+    # Insert model_provider at root level (must be before any [table] section)
+    if grep -q '^\[' "${CODEX_CONFIG_FILE}" 2>/dev/null; then
+        # Insert before first table header using awk
+        awk -v inserted=0 '
+        /^\[/ && !inserted { print "model_provider = \"copilot-proxy\""; print ""; inserted=1 }
+        { print }
+        ' "${CODEX_CONFIG_FILE}" > "${CODEX_CONFIG_FILE}.tmp" && mv "${CODEX_CONFIG_FILE}.tmp" "${CODEX_CONFIG_FILE}"
+    else
+        # No tables exist, just prepend
+        local tmp_file="${CODEX_CONFIG_FILE}.tmp"
+        echo 'model_provider = "copilot-proxy"' > "${tmp_file}"
+        echo '' >> "${tmp_file}"
+        cat "${CODEX_CONFIG_FILE}" >> "${tmp_file}"
+        mv "${tmp_file}" "${CODEX_CONFIG_FILE}"
+    fi
+
+    # Append provider definition block at end of file
+    cat >> "${CODEX_CONFIG_FILE}" <<EOF
+
+${CODEX_PROVIDER_MARKER}
+[model_providers.copilot-proxy]
+name = "Copilot API Proxy"
+base_url = "${SERVICE_URL}/v1"
+env_key = "OPENAI_API_KEY"
+${CODEX_PROVIDER_MARKER_END}
+EOF
+
+    write_success "~/.codex/config.toml (provider: copilot-proxy)"
+    echo ""
+    echo "${YELLOW}提示：建议在 config.toml 中添加以下配置以优化计费：${NC}"
+    echo "  ${WHITE}[features]${NC}"
+    echo "  ${WHITE}multi_agent = false${NC}"
+}
+
+remove_codex_config() {
+    # Remove managed block from config.toml
+    if [[ -f "${CODEX_CONFIG_FILE}" ]]; then
+        sed -i '' "/${CODEX_PROVIDER_MARKER}/,/${CODEX_PROVIDER_MARKER_END}/d" "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        sed -i '' '/^model_provider = "copilot-proxy"/d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        # Clean up trailing blank lines
+        sed -i '' -e :a -e '/^\n*$/{$d;N;ba' -e '}' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        write_success "~/.codex/config.toml 已清理 copilot-proxy 配置"
+    fi
 }
 
 set_environment_variables() {
@@ -738,8 +797,8 @@ remove_environment_variables() {
     echo "  DISABLE_TELEMETRY"
     echo ""
     echo "  ${YELLOW}[Codex CLI]${NC}"
-    echo "  OPENAI_BASE_URL"
     echo "  OPENAI_API_KEY"
+    echo "  ~/.codex/config.toml (copilot-proxy provider)"
     echo ""
     echo "${YELLOW}清除后，Claude Code / Codex CLI 将恢复使用官方 API${NC}"
     echo ""
@@ -762,7 +821,6 @@ remove_environment_variables() {
         "ANTHROPIC_AUTH_TOKEN"
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
         "DISABLE_TELEMETRY"
-        "OPENAI_BASE_URL"
         "OPENAI_API_KEY"
     )
     
@@ -783,6 +841,9 @@ remove_environment_variables() {
             done <<< "$deprecated_vars"
         fi
     fi
+    
+    # Clean up Codex CLI config.toml
+    remove_codex_config
     
     echo ""
     write_title "✓ 环境变量清除完成！"
@@ -1004,13 +1065,26 @@ show_service_status() {
                 found_any=true
                 echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
             fi
-        done < <(grep "^export OPENAI_BASE_URL=\|^export OPENAI_API_KEY=" "$SHELL_CONFIG")
+        done < <(grep "^export OPENAI_API_KEY=" "$SHELL_CONFIG")
         
         if [[ "$found_any" == "false" ]]; then
             echo "  ${RED}[×] 未配置任何环境变量${NC}"
         fi
     else
         echo "  ${RED}[×] 配置文件未找到 (${SHELL_CONFIG})${NC}"
+    fi
+    
+    # Codex CLI config.toml status
+    echo ""
+    echo "${CYAN}[Codex CLI 配置]${NC}"
+    if [[ -f "${CODEX_CONFIG_FILE}" ]] && grep -q 'copilot-proxy' "${CODEX_CONFIG_FILE}" 2>/dev/null; then
+        echo "  config.toml: ${GREEN}[✓] copilot-proxy provider 已配置${NC}"
+        local codex_base_url=$(grep 'base_url' "${CODEX_CONFIG_FILE}" 2>/dev/null | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+        if [[ -n "$codex_base_url" ]]; then
+            echo "  base_url:    ${GREEN}${codex_base_url}${NC}"
+        fi
+    else
+        echo "  config.toml: ${YELLOW}[×] 未配置 (Codex 将使用 OpenAI 官方 API)${NC}"
     fi
     
     # Watchdog status
