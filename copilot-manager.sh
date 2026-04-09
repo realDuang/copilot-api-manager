@@ -701,6 +701,8 @@ set_environment_variables() {
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL = ${sonnet_model}"
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL = ${haiku_model}"
     echo "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1"
+    echo "  CLAUDE_CODE_ATTRIBUTION_HEADER = 0"
+    echo "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = false"
     echo "  DISABLE_TELEMETRY = 1"
     echo ""
     echo "${YELLOW}配置后，所有 Claude Code 会话将使用 Copilot API${NC}"
@@ -733,6 +735,12 @@ set_environment_variables() {
     
     add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
     write_success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+
+    add_env_to_shell_config "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
+    write_success "CLAUDE_CODE_ATTRIBUTION_HEADER"
+
+    add_env_to_shell_config "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
+    write_success "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     
     add_env_to_shell_config "DISABLE_TELEMETRY" "1"
     write_success "DISABLE_TELEMETRY"
@@ -743,6 +751,8 @@ set_environment_variables() {
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+    export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
+    export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
     export DISABLE_TELEMETRY="1"
 
     # Codex CLI configuration
@@ -794,6 +804,8 @@ remove_environment_variables() {
     echo "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
     echo "  ANTHROPIC_AUTH_TOKEN"
     echo "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    echo "  CLAUDE_CODE_ATTRIBUTION_HEADER"
+    echo "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     echo "  DISABLE_TELEMETRY"
     echo ""
     echo "  ${YELLOW}[Codex CLI]${NC}"
@@ -820,6 +832,8 @@ remove_environment_variables() {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL"
         "ANTHROPIC_AUTH_TOKEN"
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+        "CLAUDE_CODE_ATTRIBUTION_HEADER"
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
         "DISABLE_TELEMETRY"
         "OPENAI_API_KEY"
     )
@@ -1055,7 +1069,7 @@ show_service_status() {
                 found_any=true
                 echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
             fi
-        done < <(grep "^export ANTHROPIC_\|^export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=" "$SHELL_CONFIG")
+        done < <(grep "^export ANTHROPIC_\|^export CLAUDE_CODE_\|^export DISABLE_TELEMETRY=" "$SHELL_CONFIG")
 
         # Codex CLI env vars
         while IFS= read -r line; do
@@ -1263,6 +1277,8 @@ invoke_quick_start() {
     add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
     add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
     add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
+    add_env_to_shell_config "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
+    add_env_to_shell_config "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
     add_env_to_shell_config "DISABLE_TELEMETRY" "1"
     
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
@@ -1270,6 +1286,8 @@ invoke_quick_start() {
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
     export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+    export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
+    export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
     export DISABLE_TELEMETRY="1"
     
     add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"

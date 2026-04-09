@@ -86,6 +86,8 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | `ANTHROPIC_SMALL_FAST_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | Haiku 模型 | `claude-haiku-3.5-20241022` |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要流量 | `1` |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER` | 禁用版本头（保持 prompt cache） | `0` |
+| `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | 关闭 prompt 建议 | `false` |
 | `OPENAI_API_KEY` | Codex CLI API Key（可选） | `dummy` |
 
 > **注意**：以上示例值仅供参考，实际可选模型由 API 实时返回。脚本会自动过滤过时版本，请从列表中选择最新可用模型。

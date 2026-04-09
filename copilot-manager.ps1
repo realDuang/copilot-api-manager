@@ -696,6 +696,8 @@ function Set-EnvironmentVariables {
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL = $SonnetModel"
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL = $HaikuModel"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1"
+    Write-Host "  CLAUDE_CODE_ATTRIBUTION_HEADER = 0"
+    Write-Host "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = false"
     Write-Host "  DISABLE_TELEMETRY = 1"
     Write-Host ""
     Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
@@ -737,6 +739,12 @@ function Set-EnvironmentVariables {
 
         [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
         Write-Success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+
+        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ATTRIBUTION_HEADER", "0", "User")
+        Write-Success "CLAUDE_CODE_ATTRIBUTION_HEADER"
+
+        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", "User")
+        Write-Success "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
 
         [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
         Write-Success "DISABLE_TELEMETRY"
@@ -799,6 +807,8 @@ function Remove-EnvironmentVariables {
     Write-Host "  ANTHROPIC_DEFAULT_HAIKU_MODEL"
     Write-Host "  ANTHROPIC_AUTH_TOKEN"
     Write-Host "  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    Write-Host "  CLAUDE_CODE_ATTRIBUTION_HEADER"
+    Write-Host "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     Write-Host "  DISABLE_TELEMETRY"
     Write-Host ""
     Write-Host "  [Codex CLI]" -ForegroundColor Yellow
@@ -824,6 +834,8 @@ function Remove-EnvironmentVariables {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER",
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
         "DISABLE_TELEMETRY",
         "OPENAI_API_KEY"
     )
@@ -1153,7 +1165,7 @@ function Show-ServiceStatus {
     Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
 
     $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -eq "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" -or $_ -eq "OPENAI_API_KEY" } |
+        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -match "^CLAUDE_CODE_" -or $_ -eq "DISABLE_TELEMETRY" -or $_ -eq "OPENAI_API_KEY" } |
         Sort-Object
 
     if ($envVarNames.Count -gt 0) {
@@ -1385,6 +1397,8 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
         [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
         [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
+        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ATTRIBUTION_HEADER", "0", "User")
+        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", "User")
         [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
 
         # Remove deprecated vars
