@@ -12,12 +12,19 @@ RESTART_COOLDOWN=300       # Cooldown period in seconds (5 minutes)
 WATCHDOG_SCRIPT="${WORK_DIR}/copilot-watchdog.sh"
 
 detect_shell_config() {
+    local config=""
     if [[ -f "$HOME/.zshrc" ]]; then
-        SHELL_CONFIG="$HOME/.zshrc"
+        config="$HOME/.zshrc"
     elif [[ -f "$HOME/.bash_profile" ]]; then
-        SHELL_CONFIG="$HOME/.bash_profile"
+        config="$HOME/.bash_profile"
     else
-        SHELL_CONFIG="$HOME/.zshrc"
+        config="$HOME/.zshrc"
+    fi
+    # Resolve symlinks so sed -i works correctly
+    if [[ -L "$config" ]]; then
+        SHELL_CONFIG=$(readlink -f "$config" 2>/dev/null || python3 -c "import os; print(os.path.realpath('$config'))")
+    else
+        SHELL_CONFIG="$config"
     fi
 }
 
@@ -117,9 +124,13 @@ fetch_models() {
 filter_and_group_models() {
     # Takes JSON from stdin, filters out unwanted models, groups by vendor
     # Output format: one line per model: "vendor|id|display_name"
+    # $1 = JSON string, $2 = optional vendor filter (e.g. "Anthropic", "OpenAI")
     local json="$1"
+    local vendor_filter="${2:-}"
     echo "$json" | python3 -c "
 import json, sys, re
+
+vendor_filter = sys.argv[1] if len(sys.argv) > 1 else ''
 
 data = json.load(sys.stdin)
 models = data.get('data', [])
@@ -179,7 +190,11 @@ for m in models:
         vendor = 'Google'
     else:
         vendor = '其他'
-    
+
+    # Apply vendor filter if specified
+    if vendor_filter and vendor != vendor_filter:
+        continue
+
     filtered.append((vendor, mid, display))
 
 # Sort: Anthropic first, then OpenAI, then Google, then Other
@@ -188,7 +203,7 @@ filtered.sort(key=lambda x: (vendor_order.get(x[0], 99), x[1]))
 
 for vendor, mid, display in filtered:
     print(f'{vendor}|{mid}|{display}')
-"
+" "$vendor_filter"
 }
 
 select_model_from_list() {
@@ -520,7 +535,8 @@ test_watchdog_running() {
 # ==================== UI Functions ====================
 
 show_model_selection_menu() {
-    local title="${1:-配置环境变量}"
+    local title="${1:-配置 Claude Code}"
+    local vendor_filter="${2:-}"
     
     {
         clear
@@ -541,7 +557,7 @@ show_model_selection_menu() {
         return 1
     fi
     
-    MODEL_LIST=$(filter_and_group_models "$json")
+    MODEL_LIST=$(filter_and_group_models "$json" "$vendor_filter")
     if [[ -z "$MODEL_LIST" ]]; then
         {
             write_error "过滤后没有可用模型"
@@ -586,11 +602,11 @@ show_model_selection_menu() {
 add_env_to_shell_config() {
     local var_name="$1"
     local var_value="$2"
-    
+
     if [[ -f "$SHELL_CONFIG" ]]; then
         sed -i '' "/^export ${var_name}=/d" "$SHELL_CONFIG" 2>/dev/null || true
     fi
-    
+
     echo "export ${var_name}=\"${var_value}\"" >> "$SHELL_CONFIG"
 }
 
@@ -615,26 +631,23 @@ MANAGED_ENV_KEYS=(
     "CLAUDE_CODE_ATTRIBUTION_HEADER"
     "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     "DISABLE_TELEMETRY"
-    "OPENAI_API_KEY"
 )
 
 write_claude_settings_json() {
     # Merge key-value pairs into ~/.claude/settings.json under the "env" key.
     # Usage: write_claude_settings_json KEY1 VAL1 KEY2 VAL2 ...
-    local args=("$@")
     local json_fragment="{"
     local first=true
-    local i=0
-    while [[ $i -lt ${#args[@]} ]]; do
-        local key="${args[$i]}"
-        local val="${args[$((i+1))]}"
+    while [[ $# -gt 0 ]]; do
+        local key="$1"
+        local val="$2"
+        shift 2
         if [[ "$first" == "true" ]]; then
             first=false
         else
             json_fragment+=","
         fi
         json_fragment+="\"${key}\":\"${val}\""
-        i=$((i+2))
     done
     json_fragment+="}"
 
@@ -714,26 +727,14 @@ with open(settings_path, 'w') as f:
 " "$json_array"
 }
 
-ask_codex_config() {
-    echo ""
-    echo "${YELLOW}是否同时配置 Codex CLI？${NC}"
-    echo "  将创建 ~/.codex/config.toml 自定义 provider 指向 Copilot API 代理"
-    echo "  并设置 OPENAI_API_KEY 环境变量以跳过 Codex 登录"
-    echo ""
-    echo -n "配置 Codex CLI？(Y/N): "
-    read codex_confirm
-    if [[ "$codex_confirm" == "Y" || "$codex_confirm" == "y" ]]; then
-        return 0
-    fi
-    return 1
-}
-
 CODEX_CONFIG_DIR="$HOME/.codex"
 CODEX_CONFIG_FILE="${CODEX_CONFIG_DIR}/config.toml"
 CODEX_PROVIDER_MARKER="# --- copilot-api-manager codex config begin ---"
 CODEX_PROVIDER_MARKER_END="# --- copilot-api-manager codex config end ---"
 
 set_codex_environment_variables() {
+    local codex_model="${1:-}"
+
     echo ""
     echo "${CYAN}[设置 Codex CLI 配置]${NC}"
 
@@ -745,24 +746,35 @@ set_codex_environment_variables() {
         sed -i '' "/${CODEX_PROVIDER_MARKER}/,/${CODEX_PROVIDER_MARKER_END}/d" "${CODEX_CONFIG_FILE}" 2>/dev/null || true
         # Remove any existing model_provider = "copilot-proxy" line
         sed -i '' '/^model_provider = "copilot-proxy"/d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        # Remove any existing model = line managed by us
+        sed -i '' '/^model = /d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
     else
         touch "${CODEX_CONFIG_FILE}"
     fi
 
-    # Insert model_provider at root level (must be before any [table] section)
+    # Insert model and model_provider at root level (must be before any [table] section)
     if grep -q '^\[' "${CODEX_CONFIG_FILE}" 2>/dev/null; then
         # Insert before first table header using awk
-        awk -v inserted=0 '
-        /^\[/ && !inserted { print "model_provider = \"copilot-proxy\""; print ""; inserted=1 }
+        awk -v inserted=0 -v model="$codex_model" '
+        /^\[/ && !inserted {
+            if (model != "") print "model = \"" model "\""
+            print "model_provider = \"copilot-proxy\""
+            print ""
+            inserted=1
+        }
         { print }
         ' "${CODEX_CONFIG_FILE}" > "${CODEX_CONFIG_FILE}.tmp" && mv "${CODEX_CONFIG_FILE}.tmp" "${CODEX_CONFIG_FILE}"
     else
         # No tables exist, just prepend
         local tmp_file="${CODEX_CONFIG_FILE}.tmp"
-        echo 'model_provider = "copilot-proxy"' > "${tmp_file}"
-        echo '' >> "${tmp_file}"
-        cat "${CODEX_CONFIG_FILE}" >> "${tmp_file}"
-        mv "${tmp_file}" "${CODEX_CONFIG_FILE}"
+        {
+            if [[ -n "$codex_model" ]]; then
+                echo "model = \"${codex_model}\""
+            fi
+            echo 'model_provider = "copilot-proxy"'
+            echo ''
+            cat "${CODEX_CONFIG_FILE}"
+        } > "${tmp_file}" && mv "${tmp_file}" "${CODEX_CONFIG_FILE}"
     fi
 
     # Append provider definition block at end of file
@@ -778,10 +790,9 @@ ${CODEX_PROVIDER_MARKER_END}
 EOF
 
     write_success "~/.codex/config.toml (provider: copilot-proxy)"
-    echo ""
-    echo "${YELLOW}提示：建议在 config.toml 中添加以下配置以优化计费：${NC}"
-    echo "  ${WHITE}[features]${NC}"
-    echo "  ${WHITE}multi_agent = false${NC}"
+    if [[ -n "$codex_model" ]]; then
+        write_success "默认模型: ${codex_model}"
+    fi
 }
 
 remove_codex_config() {
@@ -789,6 +800,7 @@ remove_codex_config() {
     if [[ -f "${CODEX_CONFIG_FILE}" ]]; then
         sed -i '' "/${CODEX_PROVIDER_MARKER}/,/${CODEX_PROVIDER_MARKER_END}/d" "${CODEX_CONFIG_FILE}" 2>/dev/null || true
         sed -i '' '/^model_provider = "copilot-proxy"/d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
+        sed -i '' '/^model = /d' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
         # Clean up trailing blank lines
         sed -i '' -e :a -e '/^\n*$/{$d;N;ba' -e '}' "${CODEX_CONFIG_FILE}" 2>/dev/null || true
         write_success "~/.codex/config.toml 已清理 copilot-proxy 配置"
@@ -801,7 +813,7 @@ set_environment_variables() {
     local haiku_model="$3"
     
     echo ""
-    echo "${WHITE}将设置以下环境变量：${NC}"
+    echo "${WHITE}将写入以下配置到 ~/.claude/settings.json：${NC}"
     echo ""
     echo "  ANTHROPIC_BASE_URL = ${SERVICE_URL}"
     echo "  ANTHROPIC_AUTH_TOKEN = dummy"
@@ -817,7 +829,7 @@ set_environment_variables() {
     echo "${YELLOW}配置文件: ~/.claude/settings.json${NC}"
     echo ""
 
-    echo -n "确认设置环境变量？(Y/N): "
+    echo -n "确认写入配置？(Y/N): "
     read confirm
     if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
         write_warning "操作已取消"
@@ -825,7 +837,7 @@ set_environment_variables() {
     fi
 
     echo ""
-    echo "${CYAN}[开始设置环境变量]${NC}"
+    echo "${CYAN}[开始写入配置]${NC}"
 
     # Build env vars list for settings.json
     local env_args=(
@@ -839,14 +851,6 @@ set_environment_variables() {
         "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
         "DISABLE_TELEMETRY" "1"
     )
-
-    # Codex CLI configuration
-    local config_codex=false
-    if ask_codex_config; then
-        config_codex=true
-        # Include OPENAI_API_KEY in settings.json so Claude Code spawns Codex with it
-        env_args+=("OPENAI_API_KEY" "dummy")
-    fi
 
     # Write all env vars to ~/.claude/settings.json
     write_claude_settings_json "${env_args[@]}"
@@ -869,30 +873,13 @@ set_environment_variables() {
     remove_env_from_shell_config "OPENAI_BASE_URL"
     remove_env_from_shell_config "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
 
-    # Export for current session
-    export ANTHROPIC_BASE_URL="${SERVICE_URL}"
-    export ANTHROPIC_AUTH_TOKEN="dummy"
-    export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
-    export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
-    export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
-    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
-    export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
-    export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
-    export DISABLE_TELEMETRY="1"
-
-    if [[ "$config_codex" == "true" ]]; then
-        export OPENAI_API_KEY="dummy"
-        write_success "OPENAI_API_KEY"
-        set_codex_environment_variables
-    fi
-
     echo ""
-    write_title "✓ 环境变量设置完成！"
+    write_title "✓ 配置设置完成！"
 
     # Auto-restart service if it's running, so new env vars take effect
     if test_port_in_use ${PORT}; then
         echo ""
-        write_info "正在重启服务以应用新环境变量..."
+        write_info "正在重启服务以应用新配置..."
         stop_service_internal
         sleep 1
         if start_service_internal; then
@@ -918,11 +905,10 @@ set_environment_variables() {
 
 remove_environment_variables() {
     clear
-    write_title "清除环境变量"
+    write_title "清除 Claude Code 配置"
 
-    echo "${WHITE}此操作将删除以下环境变量：${NC}"
+    echo "${WHITE}此操作将删除以下配置：${NC}"
     echo ""
-    echo "  ${YELLOW}[Claude Code]${NC}"
     echo "  ANTHROPIC_BASE_URL"
     echo "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     echo "  ANTHROPIC_DEFAULT_OPUS_MODEL"
@@ -933,14 +919,10 @@ remove_environment_variables() {
     echo "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     echo "  DISABLE_TELEMETRY"
     echo ""
-    echo "  ${YELLOW}[Codex CLI]${NC}"
-    echo "  OPENAI_API_KEY"
-    echo "  ~/.codex/config.toml (copilot-proxy provider)"
-    echo ""
-    echo "${YELLOW}清除后，Claude Code / Codex CLI 将恢复使用官方 API${NC}"
+    echo "${YELLOW}清除后，Claude Code 将恢复使用官方 API${NC}"
     echo ""
 
-    echo -n "确认清除环境变量？(Y/N): "
+    echo -n "确认清除配置？(Y/N): "
     read confirm
     if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
         write_warning "操作已取消"
@@ -948,7 +930,7 @@ remove_environment_variables() {
     fi
 
     echo ""
-    echo "${CYAN}[开始清除环境变量]${NC}"
+    echo "${CYAN}[开始清除配置]${NC}"
 
     # Remove managed keys from ~/.claude/settings.json
     remove_claude_settings_env "${MANAGED_ENV_KEYS[@]}"
@@ -975,15 +957,12 @@ remove_environment_variables() {
         fi
     fi
 
-    # Clean up deprecated OPENAI_BASE_URL (replaced by config.toml)
+    # Clean up deprecated OPENAI_BASE_URL
     remove_env_from_shell_config "OPENAI_BASE_URL"
     unset OPENAI_BASE_URL 2>/dev/null
 
-    # Clean up Codex CLI config.toml
-    remove_codex_config
-
     echo ""
-    write_title "✓ 环境变量清除完成！"
+    write_title "✓ 配置清除完成！"
     echo "${YELLOW}重要提示：${NC}"
     echo "  1. 重启 Claude Code 以应用更改"
     echo "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
@@ -1180,7 +1159,7 @@ show_service_status() {
     fi
     
     echo ""
-    echo "${CYAN}[检查环境变量 (settings.json)]${NC}"
+    echo "${CYAN}[Claude Code 配置 (settings.json)]${NC}"
 
     if [[ -f "$CLAUDE_SETTINGS_FILE" ]]; then
         local env_output
@@ -1200,7 +1179,7 @@ except:
     print('ERROR')
 " 2>/dev/null)
         if [[ "$env_output" == "EMPTY" || "$env_output" == "ERROR" ]]; then
-            echo "  ${RED}[×] 未配置任何环境变量${NC}"
+            echo "  ${RED}[×] 未配置${NC}"
         else
             while IFS='=' read -r var_name var_value; do
                 if [[ -n "$var_name" ]]; then
@@ -1271,7 +1250,7 @@ except:
 
 invoke_setup_env() {
     local result
-    result=$(show_model_selection_menu "配置环境变量")
+    result=$(show_model_selection_menu "配置 Claude Code" "Anthropic")
     local exit_code=$?
     
     if [[ "$result" == "FETCH_FAILED" || "$result" == "INVALID" || $exit_code -ne 0 ]]; then
@@ -1373,7 +1352,7 @@ invoke_quick_start() {
     write_info "[步骤 2/3] 获取可用模型..."
     
     local result
-    result=$(show_model_selection_menu "一键配置并启动")
+    result=$(show_model_selection_menu "一键配置并启动" "Anthropic")
     local exit_code=$?
     
     if [[ "$result" == "FETCH_FAILED" || "$result" == "INVALID" || $exit_code -ne 0 ]]; then
@@ -1393,7 +1372,7 @@ invoke_quick_start() {
     fi
     
     # Step 3: Configure environment variables
-    write_info "[步骤 3/3] 配置环境变量..."
+    write_info "[步骤 3/3] 写入配置..."
     echo ""
 
     # Build env vars list for settings.json
@@ -1409,26 +1388,8 @@ invoke_quick_start() {
         "DISABLE_TELEMETRY" "1"
     )
 
-    # Codex CLI configuration
-    local config_codex=false
-    if ask_codex_config; then
-        config_codex=true
-        env_args+=("OPENAI_API_KEY" "dummy")
-    fi
-
     # Write all env vars to ~/.claude/settings.json
     write_claude_settings_json "${env_args[@]}"
-
-    # Export for current session
-    export ANTHROPIC_BASE_URL="${SERVICE_URL}"
-    export ANTHROPIC_AUTH_TOKEN="dummy"
-    export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
-    export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
-    export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
-    export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
-    export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
-    export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
-    export DISABLE_TELEMETRY="1"
 
     # Clean up legacy env vars from shell config
     for key in "${MANAGED_ENV_KEYS[@]}"; do
@@ -1436,14 +1397,8 @@ invoke_quick_start() {
     done
     remove_env_from_shell_config "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
     remove_env_from_shell_config "OPENAI_BASE_URL"
-    unset DISABLE_NON_ESSENTIAL_MODEL_CALLS 2>/dev/null
 
-    write_success "环境变量配置完成"
-
-    if [[ "$config_codex" == "true" ]]; then
-        export OPENAI_API_KEY="dummy"
-        set_codex_environment_variables
-    fi
+    write_success "配置写入完成"
     
     # Restart service to apply new env vars
     write_info "正在重启服务以应用新配置..."
@@ -1589,6 +1544,116 @@ invoke_toggle_autostart() {
     fi
 }
 
+invoke_setup_codex() {
+    clear
+    write_title "配置 Codex CLI"
+
+    write_info "正在从 API 获取可用模型..."
+
+    local json
+    json=$(fetch_models)
+    if [[ -z "$json" ]]; then
+        echo ""
+        write_error "无法获取模型列表。服务是否在端口 ${PORT} 上运行？"
+        write_info "请先启动服务（主菜单选项 1）"
+        echo ""
+        return
+    fi
+
+    MODEL_LIST=$(filter_and_group_models "$json" "OpenAI")
+    if [[ -z "$MODEL_LIST" ]]; then
+        write_error "没有可用的 OpenAI 模型"
+        return
+    fi
+
+    write_success "找到 $(echo "$MODEL_LIST" | wc -l | tr -d ' ') 个可用模型"
+
+    local codex_model
+    codex_model=$(select_model_from_list "Codex 默认模型")
+    if [[ -z "$codex_model" ]]; then
+        write_error "无效的模型选择"
+        return
+    fi
+
+    echo ""
+    echo "${WHITE}将执行以下配置：${NC}"
+    echo ""
+    echo "  默认模型: ${codex_model}"
+    echo "  OPENAI_API_KEY = dummy -> ${SHELL_CONFIG}"
+    echo "  ~/.codex/config.toml -> copilot-proxy provider"
+    echo ""
+    echo "${YELLOW}配置后，Codex CLI 将通过 Copilot API 代理使用${NC}"
+    echo ""
+
+    echo -n "确认配置 Codex CLI？(Y/N): "
+    read confirm
+    if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
+        write_warning "操作已取消"
+        return
+    fi
+
+    echo ""
+    echo "${CYAN}[开始配置 Codex CLI]${NC}"
+
+    # Write OPENAI_API_KEY to shell config for global availability
+    add_env_to_shell_config "OPENAI_API_KEY" "dummy"
+    write_success "OPENAI_API_KEY -> ${SHELL_CONFIG}"
+
+    # Clean up OPENAI_API_KEY from settings.json if left over from older versions
+    remove_claude_settings_env "OPENAI_API_KEY"
+
+    # Set up ~/.codex/config.toml with selected model
+    set_codex_environment_variables "$codex_model"
+
+    echo ""
+    write_title "✓ Codex CLI 配置完成！"
+    echo "${YELLOW}重要提示：${NC}"
+    echo "  1. 重启 Claude Code / Codex CLI 以应用新配置"
+    echo "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
+    echo ""
+}
+
+invoke_remove_codex() {
+    clear
+    write_title "清除 Codex CLI 配置"
+
+    echo "${WHITE}此操作将删除以下配置：${NC}"
+    echo ""
+    echo "  OPENAI_API_KEY (从 ${SHELL_CONFIG})"
+    echo "  ~/.codex/config.toml (copilot-proxy provider)"
+    echo ""
+    echo "${YELLOW}清除后，Codex CLI 将恢复使用 OpenAI 官方 API${NC}"
+    echo ""
+
+    echo -n "确认清除 Codex CLI 配置？(Y/N): "
+    read confirm
+    if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
+        write_warning "操作已取消"
+        return
+    fi
+
+    echo ""
+    echo "${CYAN}[开始清除 Codex CLI 配置]${NC}"
+
+    # Remove OPENAI_API_KEY from shell config
+    remove_env_from_shell_config "OPENAI_API_KEY"
+    unset OPENAI_API_KEY 2>/dev/null
+    write_success "OPENAI_API_KEY 已删除"
+
+    # Also clean up from settings.json (backward compat)
+    remove_claude_settings_env "OPENAI_API_KEY"
+
+    # Remove Codex config.toml managed block
+    remove_codex_config
+
+    echo ""
+    write_title "✓ Codex CLI 配置清除完成！"
+    echo "${YELLOW}重要提示：${NC}"
+    echo "  1. 重启 Codex CLI 以应用更改"
+    echo "  2. 重启 IDE/编辑器使更改生效"
+    echo ""
+}
+
 # ==================== Main Menu ====================
 
 show_main_menu() {
@@ -1605,24 +1670,26 @@ show_main_menu() {
         echo "  ${WHITE}2. 停止服务${NC}"
         echo "  ${WHITE}3. 检查服务状态${NC}"
         echo ""
-        echo "  ${YELLOW}[环境配置]${NC}"
-        echo "  ${WHITE}4. 配置环境变量${NC}"
-        echo "  ${WHITE}5. 清除环境变量${NC}"
+        echo "  ${YELLOW}[配置管理]${NC}"
+        echo "  ${WHITE}4. 配置 Claude Code${NC}"
+        echo "  ${WHITE}5. 清除 Claude Code 配置${NC}"
+        echo "  ${WHITE}6. 配置 Codex CLI${NC}"
+        echo "  ${WHITE}7. 清除 Codex CLI 配置${NC}"
         echo ""
         echo "  ${YELLOW}[快捷操作]${NC}"
-        echo "  ${CYAN}6. 一键配置并启动${NC}"
+        echo "  ${CYAN}8. 一键配置并启动${NC}"
         local autostart_status
         if test_autostart_registered; then
             autostart_status="已启用"
         else
             autostart_status="未启用"
         fi
-        echo "  ${WHITE}7. 开机自启 (${autostart_status})${NC}"
+        echo "  ${WHITE}9. 开机自启 (${autostart_status})${NC}"
         echo "  0. 退出"
         echo ""
         echo "${CYAN}======================================${NC}"
-        
-        echo -n "请选择操作 (0-7): "
+
+        echo -n "请选择操作 (0-9): "
         read choice
         
         case "$choice" in
@@ -1652,11 +1719,21 @@ show_main_menu() {
                 read
                 ;;
             6)
-                invoke_quick_start
+                invoke_setup_codex
                 echo -n "按 Enter 继续..."
                 read
                 ;;
             7)
+                invoke_remove_codex
+                echo -n "按 Enter 继续..."
+                read
+                ;;
+            8)
+                invoke_quick_start
+                echo -n "按 Enter 继续..."
+                read
+                ;;
+            9)
                 invoke_toggle_autostart
                 echo -n "按 Enter 继续..."
                 read

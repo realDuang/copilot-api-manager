@@ -457,7 +457,10 @@ function Get-AvailableModels {
 }
 
 function Get-FilteredModels {
-    param([array]$Models)
+    param(
+        [array]$Models,
+        [string]$VendorFilter = ""
+    )
     
     # Filter criteria
     $skipPatterns = @(
@@ -506,7 +509,10 @@ function Get-FilteredModels {
             'google' { 'Google'; break }
             default { '其他' }
         }
-        
+
+        # Apply vendor filter if specified
+        if ($VendorFilter -ne "" -and $vendor -ne $VendorFilter) { continue }
+
         $filtered += [PSCustomObject]@{
             Vendor = $vendor
             Id = $mid
@@ -571,6 +577,7 @@ function Select-ModelFromList {
 }
 
 function Show-ModelSelectionMenu {
+    param([string]$VendorFilter = "")
     Write-Host ""
     Write-Info "正在从 API 获取可用模型..."
 
@@ -583,7 +590,7 @@ function Show-ModelSelectionMenu {
         return "FETCH_FAILED"
     }
 
-    $models = Get-FilteredModels -Models $rawModels
+    $models = Get-FilteredModels -Models $rawModels -VendorFilter $VendorFilter
     if ($models.Count -eq 0) {
         Write-Error "过滤后没有可用模型"
         return "FETCH_FAILED"
@@ -621,6 +628,8 @@ $script:CodexMarkerBegin = "# --- copilot-api-manager codex config begin ---"
 $script:CodexMarkerEnd = "# --- copilot-api-manager codex config end ---"
 
 function Set-CodexConfig {
+    param([string]$Model = "")
+
     $configDir = $script:CodexConfigDir
     $configFile = $script:CodexConfigFile
 
@@ -645,17 +654,26 @@ $($script:CodexMarkerEnd)
         $content = $content -replace "(?s)$([regex]::Escape($script:CodexMarkerBegin)).*?$([regex]::Escape($script:CodexMarkerEnd))\r?\n?", ""
         # Remove existing model_provider = "copilot-proxy"
         $content = $content -replace '(?m)^model_provider = "copilot-proxy"\r?\n?', ""
+        # Remove existing model = line managed by us
+        $content = $content -replace '(?m)^model = ".*"\r?\n?', ""
     }
     else {
         $content = ""
     }
 
-    # Insert model_provider at root level (before any [table] section)
+    # Build root-level config lines
+    $rootLines = ""
+    if ($Model -ne "") {
+        $rootLines += "model = `"$Model`"`n"
+    }
+    $rootLines += "model_provider = `"copilot-proxy`""
+
+    # Insert at root level (before any [table] section)
     if ($content -match '(?m)^\[') {
-        $content = $content -replace '(?m)(^\[)', "model_provider = `"copilot-proxy`"`n`n`$1", 1
+        $content = $content -replace '(?m)(^\[)', "$rootLines`n`n`$1", 1
     }
     else {
-        $content = "model_provider = `"copilot-proxy`"`n`n" + $content
+        $content = "$rootLines`n`n" + $content
     }
 
     # Append provider block
@@ -663,10 +681,9 @@ $($script:CodexMarkerEnd)
 
     Set-Content -Path $configFile -Value $content -NoNewline
     Write-Success "~/.codex/config.toml (provider: copilot-proxy)"
-    Write-Host ""
-    Write-Host "提示：建议在 config.toml 中添加以下配置以优化计费：" -ForegroundColor Yellow
-    Write-Host "  [features]" -ForegroundColor White
-    Write-Host "  multi_agent = false" -ForegroundColor White
+    if ($Model -ne "") {
+        Write-Success "默认模型: $Model"
+    }
 }
 
 function Remove-CodexConfig {
@@ -675,6 +692,7 @@ function Remove-CodexConfig {
         $content = Get-Content $configFile -Raw
         $content = $content -replace "(?s)$([regex]::Escape($script:CodexMarkerBegin)).*?$([regex]::Escape($script:CodexMarkerEnd))\r?\n?", ""
         $content = $content -replace '(?m)^model_provider = "copilot-proxy"\r?\n?', ""
+        $content = $content -replace '(?m)^model = ".*"\r?\n?', ""
         $content = $content.TrimEnd() + "`n"
         Set-Content -Path $configFile -Value $content -NoNewline
         Write-Success "~/.codex/config.toml 已清理 copilot-proxy 配置"
@@ -693,8 +711,7 @@ $script:ManagedEnvKeys = @(
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
     "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
-    "DISABLE_TELEMETRY",
-    "OPENAI_API_KEY"
+    "DISABLE_TELEMETRY"
 )
 
 function Write-ClaudeSettingsJson {
@@ -845,7 +862,7 @@ function Set-EnvironmentVariables {
     )
 
     Write-Host ""
-    Write-Host "将设置以下环境变量：" -ForegroundColor White
+    Write-Host "将写入以下配置到 ~/.claude/settings.json：" -ForegroundColor White
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL = $script:ServiceUrl"
     Write-Host "  ANTHROPIC_AUTH_TOKEN = dummy"
@@ -861,24 +878,14 @@ function Set-EnvironmentVariables {
     Write-Host "配置文件: ~/.claude/settings.json" -ForegroundColor Yellow
     Write-Host ""
 
-    $codexConfirm = Read-Host "是否同时配置 Codex CLI? (Y/N)"
-    $configCodex = ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y')
-    if ($configCodex) {
-        Write-Host ""
-        Write-Host "  [Codex CLI]" -ForegroundColor Yellow
-        Write-Host "  OPENAI_API_KEY = dummy"
-        Write-Host "  ~/.codex/config.toml -> copilot-proxy provider"
-    }
-    Write-Host ""
-
-    $confirm = Read-Host "确认设置环境变量? (Y/N)"
+    $confirm = Read-Host "确认写入配置? (Y/N)"
     if ($confirm -ne 'Y' -and $confirm -ne 'y') {
         Write-Warning "操作已取消"
         return $false
     }
 
     Write-Host ""
-    Write-Host "[开始设置环境变量]" -ForegroundColor Cyan
+    Write-Host "[开始写入配置]" -ForegroundColor Cyan
 
     try {
         # Build env vars hashtable for settings.json
@@ -892,10 +899,6 @@ function Set-EnvironmentVariables {
             "CLAUDE_CODE_ATTRIBUTION_HEADER" = "0"
             "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" = "false"
             "DISABLE_TELEMETRY" = "1"
-        }
-
-        if ($configCodex) {
-            $envVars["OPENAI_API_KEY"] = "dummy"
         }
 
         # Write all env vars to ~/.claude/settings.json
@@ -916,15 +919,8 @@ function Set-EnvironmentVariables {
         # Also clean deprecated vars
         Remove-LegacyRegistryEnvVars -VarNames @("OPENAI_BASE_URL", "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
 
-        if ($configCodex) {
-            Write-Host ""
-            Write-Host "[设置 Codex CLI 配置]" -ForegroundColor Cyan
-            Write-Success "OPENAI_API_KEY"
-            Set-CodexConfig
-        }
-
         Write-Host ""
-        Write-Title "✓ 环境变量设置完成！"
+        Write-Title "✓ 配置设置完成！"
 
         # Auto-restart service if running, so new env vars take effect
         if (Test-PortInUse -Port $script:Port) {
@@ -954,18 +950,17 @@ function Set-EnvironmentVariables {
         return $true
     }
     catch {
-        Write-Error "设置环境变量失败: $_"
+        Write-Error "写入配置失败: $_"
         return $false
     }
 }
 
 function Remove-EnvironmentVariables {
     Clear-HostSafe
-    Write-Title "清除环境变量"
+    Write-Title "清除 Claude Code 配置"
 
-    Write-Host "此操作将删除以下环境变量：" -ForegroundColor White
+    Write-Host "此操作将删除以下配置：" -ForegroundColor White
     Write-Host ""
-    Write-Host "  [Claude Code]" -ForegroundColor Yellow
     Write-Host "  ANTHROPIC_BASE_URL"
     Write-Host "  ANTHROPIC_DEFAULT_SONNET_MODEL"
     Write-Host "  ANTHROPIC_DEFAULT_OPUS_MODEL"
@@ -976,21 +971,17 @@ function Remove-EnvironmentVariables {
     Write-Host "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
     Write-Host "  DISABLE_TELEMETRY"
     Write-Host ""
-    Write-Host "  [Codex CLI]" -ForegroundColor Yellow
-    Write-Host "  OPENAI_API_KEY"
-    Write-Host "  ~/.codex/config.toml (copilot-proxy provider)"
-    Write-Host ""
-    Write-Host "清除后，Claude Code / Codex CLI 将恢复使用官方 API" -ForegroundColor Yellow
+    Write-Host "清除后，Claude Code 将恢复使用官方 API" -ForegroundColor Yellow
     Write-Host ""
 
-    $confirm = Read-Host "确认清除环境变量? (Y/N)"
+    $confirm = Read-Host "确认清除配置? (Y/N)"
     if ($confirm -ne 'Y' -and $confirm -ne 'y') {
         Write-Warning "操作已取消"
         return
     }
 
     Write-Host ""
-    Write-Host "[开始清除环境变量]" -ForegroundColor Cyan
+    Write-Host "[开始清除配置]" -ForegroundColor Cyan
 
     # Remove managed keys from ~/.claude/settings.json
     Remove-ClaudeSettingsEnv -Keys $script:ManagedEnvKeys
@@ -1037,11 +1028,8 @@ public static extern IntPtr SendMessageTimeout(
     $result = [UIntPtr]::Zero
     [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
 
-    # Clean up Codex CLI config.toml
-    Remove-CodexConfig
-
     Write-Host ""
-    Write-Title "✓ 环境变量清除完成！"
+    Write-Title "✓ 配置清除完成！"
     Write-Host "重要提示：" -ForegroundColor Yellow
     Write-Host "  1. 重启 Claude Code 以应用更改"
     Write-Host "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
@@ -1308,24 +1296,42 @@ function Show-ServiceStatus {
         Write-Host "  端口:    $script:Port (空闲)"
     }
 
-    # 检查环境变量
+    # Claude Code 配置 (settings.json)
     Write-Host ""
-    Write-Host "[检查全局环境变量]" -ForegroundColor Cyan
+    Write-Host "[Claude Code 配置 (settings.json)]" -ForegroundColor Cyan
 
-    $envVarNames = [Environment]::GetEnvironmentVariables("User").Keys | 
-        Where-Object { $_ -match "^ANTHROPIC_" -or $_ -match "^CLAUDE_CODE_" -or $_ -eq "DISABLE_TELEMETRY" -or $_ -eq "OPENAI_API_KEY" } |
-        Sort-Object
-
-    if ($envVarNames.Count -gt 0) {
-        foreach ($varName in $envVarNames) {
-            $varValue = [Environment]::GetEnvironmentVariable($varName, "User")
-            Write-Host "  ${varName}: " -NoNewline
-            Write-Host "[✓] $varValue" -ForegroundColor Green
+    $settingsPath = $script:ClaudeSettingsFile
+    if (Test-Path $settingsPath) {
+        try {
+            $content = Get-Content $settingsPath -Raw -ErrorAction Stop
+            $settings = $content | ConvertFrom-Json -ErrorAction Stop
+            $envObj = $settings.env
+            if ($null -ne $envObj) {
+                $envProps = $envObj.PSObject.Properties | Sort-Object Name
+                if ($envProps.Count -gt 0) {
+                    foreach ($prop in $envProps) {
+                        Write-Host "  $($prop.Name): " -NoNewline
+                        Write-Host "[✓] $($prop.Value)" -ForegroundColor Green
+                    }
+                }
+                else {
+                    Write-Host "  " -NoNewline
+                    Write-Host "[×] 未配置" -ForegroundColor Red
+                }
+            }
+            else {
+                Write-Host "  " -NoNewline
+                Write-Host "[×] 未配置" -ForegroundColor Red
+            }
+        }
+        catch {
+            Write-Host "  " -NoNewline
+            Write-Host "[×] 读取配置文件失败" -ForegroundColor Red
         }
     }
     else {
         Write-Host "  " -NoNewline
-        Write-Host "[×] 未配置任何环境变量" -ForegroundColor Red
+        Write-Host "[×] 配置文件未找到 (~/.claude/settings.json)" -ForegroundColor Red
     }
 
     # Codex CLI config.toml status
@@ -1391,9 +1397,9 @@ function Show-ServiceStatus {
 
 function Invoke-SetupEnv {
     Clear-HostSafe
-    Write-Title "配置全局环境变量"
+    Write-Title "配置 Claude Code"
 
-    $result = Show-ModelSelectionMenu
+    $result = Show-ModelSelectionMenu -VendorFilter "Anthropic"
 
     if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
         Start-Sleep -Seconds 2
@@ -1518,7 +1524,7 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
     # Step 2: Fetch models and let user select
     Write-Info "[步骤 2/3] 获取可用模型..."
 
-    $result = Show-ModelSelectionMenu
+    $result = Show-ModelSelectionMenu -VendorFilter "Anthropic"
 
     if ($result -eq "FETCH_FAILED" -or $result -eq "INVALID" -or $null -eq $result) {
         Write-Host ""
@@ -1537,37 +1543,33 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
     }
 
     # Step 3: Configure environment variables
-    Write-Info "[步骤 3/3] 配置全局环境变量..."
+    Write-Info "[步骤 3/3] 写入配置..."
 
     try {
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $opusModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $sonnetModel, "User")
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $haikuModel, "User")
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ATTRIBUTION_HEADER", "0", "User")
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", "User")
-        [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
-
-        # Remove deprecated vars
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
-        [Environment]::SetEnvironmentVariable("DISABLE_NON_ESSENTIAL_MODEL_CALLS", $null, "User")
-
-        Write-Success "环境变量配置完成"
-
-        # Codex CLI configuration
-        Write-Host ""
-        $codexConfirm = Read-Host "是否同时配置 Codex CLI? (Y/N)"
-        if ($codexConfirm -eq 'Y' -or $codexConfirm -eq 'y') {
-            Write-Host ""
-            Write-Host "[设置 Codex CLI 配置]" -ForegroundColor Cyan
-            [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
-            Write-Success "OPENAI_API_KEY (env)"
-            Set-CodexConfig
+        # Build env vars hashtable for settings.json
+        $envVars = @{
+            "ANTHROPIC_BASE_URL" = $script:ServiceUrl
+            "ANTHROPIC_AUTH_TOKEN" = "dummy"
+            "ANTHROPIC_DEFAULT_OPUS_MODEL" = $opusModel
+            "ANTHROPIC_DEFAULT_SONNET_MODEL" = $sonnetModel
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL" = $haikuModel
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" = "1"
+            "CLAUDE_CODE_ATTRIBUTION_HEADER" = "0"
+            "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" = "false"
+            "DISABLE_TELEMETRY" = "1"
         }
+
+        # Write all env vars to ~/.claude/settings.json
+        Write-ClaudeSettingsJson -EnvVars $envVars
+
+        # Clean up legacy env vars from Windows registry
+        Remove-LegacyRegistryEnvVars -VarNames $script:ManagedEnvKeys
+        Remove-LegacyRegistryEnvVars -VarNames @("OPENAI_BASE_URL", "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
+
+        Write-Success "配置写入完成"
     }
     catch {
-        Write-Error "配置环境变量失败: $_"
+        Write-Error "写入配置失败: $_"
         return
     }
 
@@ -1603,9 +1605,134 @@ WshShell.Run "cmd /c npx -y copilot-api@latest start --port $script:Port >> copi
     Write-Host "  监控面板: https://ericc-ch.github.io/copilot-api?endpoint=$script:ServiceUrl/usage" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "重要提示：" -ForegroundColor Yellow
-    Write-Host "  - 需要重启 IDE/编辑器使环境变量生效"
+    Write-Host "  - 重启 Claude Code 或 IDE/编辑器使配置生效"
     Write-Host "  - 服务和守护进程在后台运行，关闭此窗口不影响运行"
     Write-Host "  - 守护进程会在服务异常时自动重启服务"
+    Write-Host ""
+}
+
+function Invoke-SetupCodex {
+    Clear-HostSafe
+    Write-Title "配置 Codex CLI"
+
+    Write-Info "正在从 API 获取可用模型..."
+
+    $rawModels = Get-AvailableModels
+    if ($null -eq $rawModels) {
+        Write-Host ""
+        Write-Error "无法获取模型列表。服务是否在端口 ${script:Port} 上运行？"
+        Write-Info "请先启动服务（主菜单选项 1）"
+        Write-Host ""
+        return
+    }
+
+    $models = Get-FilteredModels -Models $rawModels -VendorFilter "OpenAI"
+    if ($models.Count -eq 0) {
+        Write-Error "没有可用的 OpenAI 模型"
+        return
+    }
+
+    Write-Success "找到 $($models.Count) 个可用模型"
+
+    $codexModel = Select-ModelFromList -Role "Codex 默认模型" -Models $models
+    if ([string]::IsNullOrWhiteSpace($codexModel)) {
+        Write-Error "无效的模型选择"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "将执行以下配置：" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  默认模型: $codexModel"
+    Write-Host "  OPENAI_API_KEY = dummy -> 用户环境变量"
+    Write-Host "  ~/.codex/config.toml -> copilot-proxy provider"
+    Write-Host ""
+    Write-Host "配置后，Codex CLI 将通过 Copilot API 代理使用" -ForegroundColor Yellow
+    Write-Host ""
+
+    $confirm = Read-Host "确认配置 Codex CLI? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Warning "操作已取消"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "[开始配置 Codex CLI]" -ForegroundColor Cyan
+
+    # Write OPENAI_API_KEY to user environment variable for global availability
+    [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
+    $env:OPENAI_API_KEY = "dummy"
+    Write-Success "OPENAI_API_KEY -> 用户环境变量"
+
+    # Clean up OPENAI_API_KEY from settings.json if left over from older versions
+    Remove-ClaudeSettingsEnv -Keys @("OPENAI_API_KEY")
+
+    # Set up ~/.codex/config.toml with selected model
+    Set-CodexConfig -Model $codexModel
+
+    Write-Host ""
+    Write-Title "✓ Codex CLI 配置完成！"
+    Write-Host "重要提示：" -ForegroundColor Yellow
+    Write-Host "  1. 重启 Claude Code / Codex CLI 以应用新配置"
+    Write-Host "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
+    Write-Host ""
+}
+
+function Invoke-RemoveCodex {
+    Clear-HostSafe
+    Write-Title "清除 Codex CLI 配置"
+
+    Write-Host "此操作将删除以下配置：" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  OPENAI_API_KEY (从用户环境变量)"
+    Write-Host "  ~/.codex/config.toml (copilot-proxy provider)"
+    Write-Host ""
+    Write-Host "清除后，Codex CLI 将恢复使用 OpenAI 官方 API" -ForegroundColor Yellow
+    Write-Host ""
+
+    $confirm = Read-Host "确认清除 Codex CLI 配置? (Y/N)"
+    if ($confirm -ne 'Y' -and $confirm -ne 'y') {
+        Write-Warning "操作已取消"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "[开始清除 Codex CLI 配置]" -ForegroundColor Cyan
+
+    # Remove OPENAI_API_KEY from user environment variable
+    [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", $null, "User")
+    Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
+    Write-Success "OPENAI_API_KEY 已删除"
+
+    # Also clean up from settings.json (backward compat)
+    Remove-ClaudeSettingsEnv -Keys @("OPENAI_API_KEY")
+
+    # Remove Codex config.toml managed block
+    Remove-CodexConfig
+
+    # Broadcast environment change to notify other applications
+    if (-not ("Win32.NativeMethods" -as [type])) {
+        try {
+            Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+"@
+        } catch {}
+    }
+    try {
+        $HWND_BROADCAST = [IntPtr]0xffff
+        $WM_SETTINGCHANGE = 0x1a
+        $result = [UIntPtr]::Zero
+        [Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, "Environment", 2, 5000, [ref]$result) | Out-Null
+    } catch {}
+
+    Write-Host ""
+    Write-Title "✓ Codex CLI 配置清除完成！"
+    Write-Host "重要提示：" -ForegroundColor Yellow
+    Write-Host "  1. 重启 Codex CLI 以应用更改"
+    Write-Host "  2. 重启 IDE/编辑器使更改生效"
     Write-Host ""
 }
 
@@ -1622,19 +1749,21 @@ function Show-MainMenu {
         Write-Host "  2. 停止服务" -ForegroundColor White
         Write-Host "  3. 检查服务状态" -ForegroundColor White
         Write-Host ""
-        Write-Host "  [环境配置]" -ForegroundColor Yellow
-        Write-Host "  4. 配置全局环境变量" -ForegroundColor White
-        Write-Host "  5. 清除全局环境变量" -ForegroundColor White
+        Write-Host "  [配置管理]" -ForegroundColor Yellow
+        Write-Host "  4. 配置 Claude Code" -ForegroundColor White
+        Write-Host "  5. 清除 Claude Code 配置" -ForegroundColor White
+        Write-Host "  6. 配置 Codex CLI" -ForegroundColor White
+        Write-Host "  7. 清除 Codex CLI 配置" -ForegroundColor White
         Write-Host ""
         Write-Host "  [快捷操作]" -ForegroundColor Yellow
-        Write-Host "  6. 一键配置并启动" -ForegroundColor Cyan
+        Write-Host "  8. 一键配置并启动" -ForegroundColor Cyan
         $autostartStatus = if (Test-AutostartRegistered) { "已启用" } else { "未启用" }
-        Write-Host "  7. 开机自启 ($autostartStatus)" -ForegroundColor White
+        Write-Host "  9. 开机自启 ($autostartStatus)" -ForegroundColor White
         Write-Host "  0. 退出" -ForegroundColor Gray
         Write-Host ""
         Write-Host "======================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "请选择操作 (0-7)"
+        $choice = Read-Host "请选择操作 (0-9)"
 
         switch ($choice) {
             "1" {
@@ -1658,10 +1787,18 @@ function Show-MainMenu {
                 Read-Host "按 Enter 继续"
             }
             "6" {
-                Invoke-QuickStart
+                Invoke-SetupCodex
                 Read-Host "按 Enter 继续"
             }
             "7" {
+                Invoke-RemoveCodex
+                Read-Host "按 Enter 继续"
+            }
+            "8" {
+                Invoke-QuickStart
+                Read-Host "按 Enter 继续"
+            }
+            "9" {
                 Invoke-ToggleAutostart
                 Read-Host "按 Enter 继续"
             }
