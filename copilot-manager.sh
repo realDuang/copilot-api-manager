@@ -784,7 +784,6 @@ ${CODEX_PROVIDER_MARKER}
 [model_providers.copilot-proxy]
 name = "Copilot API Proxy"
 base_url = "http://127.0.0.1:${PORT}/v1"
-env_key = "OPENAI_API_KEY"
 supports_websockets = false
 ${CODEX_PROVIDER_MARKER_END}
 EOF
@@ -1579,7 +1578,6 @@ invoke_setup_codex() {
     echo "${WHITE}将执行以下配置：${NC}"
     echo ""
     echo "  默认模型: ${codex_model}"
-    echo "  OPENAI_API_KEY = dummy -> ${SHELL_CONFIG}"
     echo "  ~/.codex/config.toml -> copilot-proxy provider"
     echo ""
     echo "${YELLOW}配置后，Codex CLI 将通过 Copilot API 代理使用${NC}"
@@ -1595,11 +1593,8 @@ invoke_setup_codex() {
     echo ""
     echo "${CYAN}[开始配置 Codex CLI]${NC}"
 
-    # Write OPENAI_API_KEY to shell config for global availability
-    add_env_to_shell_config "OPENAI_API_KEY" "dummy"
-    write_success "OPENAI_API_KEY -> ${SHELL_CONFIG}"
-
-    # Clean up OPENAI_API_KEY from settings.json if left over from older versions
+    # Clean up legacy OPENAI_API_KEY from shell config and settings.json
+    remove_env_from_shell_config "OPENAI_API_KEY"
     remove_claude_settings_env "OPENAI_API_KEY"
 
     # Set up ~/.codex/config.toml with selected model
@@ -1619,7 +1614,6 @@ invoke_remove_codex() {
 
     echo "${WHITE}此操作将删除以下配置：${NC}"
     echo ""
-    echo "  OPENAI_API_KEY (从 ${SHELL_CONFIG})"
     echo "  ~/.codex/config.toml (copilot-proxy provider)"
     echo ""
     echo "${YELLOW}清除后，Codex CLI 将恢复使用 OpenAI 官方 API${NC}"
@@ -1635,12 +1629,9 @@ invoke_remove_codex() {
     echo ""
     echo "${CYAN}[开始清除 Codex CLI 配置]${NC}"
 
-    # Remove OPENAI_API_KEY from shell config
+    # Clean up legacy OPENAI_API_KEY from shell config and settings.json
     remove_env_from_shell_config "OPENAI_API_KEY"
     unset OPENAI_API_KEY 2>/dev/null
-    write_success "OPENAI_API_KEY 已删除"
-
-    # Also clean up from settings.json (backward compat)
     remove_claude_settings_env "OPENAI_API_KEY"
 
     # Remove Codex config.toml managed block

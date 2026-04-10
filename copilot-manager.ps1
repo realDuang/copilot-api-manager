@@ -643,7 +643,6 @@ $($script:CodexMarkerBegin)
 [model_providers.copilot-proxy]
 name = "Copilot API Proxy"
 base_url = "http://127.0.0.1:$($script:Port)/v1"
-env_key = "OPENAI_API_KEY"
 supports_websockets = false
 $($script:CodexMarkerEnd)
 "@
@@ -1644,7 +1643,6 @@ function Invoke-SetupCodex {
     Write-Host "将执行以下配置：" -ForegroundColor White
     Write-Host ""
     Write-Host "  默认模型: $codexModel"
-    Write-Host "  OPENAI_API_KEY = dummy -> 用户环境变量"
     Write-Host "  ~/.codex/config.toml -> copilot-proxy provider"
     Write-Host ""
     Write-Host "配置后，Codex CLI 将通过 Copilot API 代理使用" -ForegroundColor Yellow
@@ -1659,12 +1657,9 @@ function Invoke-SetupCodex {
     Write-Host ""
     Write-Host "[开始配置 Codex CLI]" -ForegroundColor Cyan
 
-    # Write OPENAI_API_KEY to user environment variable for global availability
-    [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
-    $env:OPENAI_API_KEY = "dummy"
-    Write-Success "OPENAI_API_KEY -> 用户环境变量"
-
-    # Clean up OPENAI_API_KEY from settings.json if left over from older versions
+    # Clean up legacy OPENAI_API_KEY
+    [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", $null, "User")
+    Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
     Remove-ClaudeSettingsEnv -Keys @("OPENAI_API_KEY")
 
     # Set up ~/.codex/config.toml with selected model
@@ -1684,7 +1679,6 @@ function Invoke-RemoveCodex {
 
     Write-Host "此操作将删除以下配置：" -ForegroundColor White
     Write-Host ""
-    Write-Host "  OPENAI_API_KEY (从用户环境变量)"
     Write-Host "  ~/.codex/config.toml (copilot-proxy provider)"
     Write-Host ""
     Write-Host "清除后，Codex CLI 将恢复使用 OpenAI 官方 API" -ForegroundColor Yellow
@@ -1699,12 +1693,9 @@ function Invoke-RemoveCodex {
     Write-Host ""
     Write-Host "[开始清除 Codex CLI 配置]" -ForegroundColor Cyan
 
-    # Remove OPENAI_API_KEY from user environment variable
+    # Clean up legacy OPENAI_API_KEY
     [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", $null, "User")
     Remove-Item Env:\OPENAI_API_KEY -ErrorAction SilentlyContinue
-    Write-Success "OPENAI_API_KEY 已删除"
-
-    # Also clean up from settings.json (backward compat)
     Remove-ClaudeSettingsEnv -Keys @("OPENAI_API_KEY")
 
     # Remove Codex config.toml managed block

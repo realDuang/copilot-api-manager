@@ -88,7 +88,6 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | 禁用非必要流量 | `1` |
 | `CLAUDE_CODE_ATTRIBUTION_HEADER` | 禁用版本头（保持 prompt cache） | `0` |
 | `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` | 关闭 prompt 建议 | `false` |
-| `OPENAI_API_KEY` | Codex CLI API Key（可选） | `dummy` |
 
 > **注意**：以上示例值仅供参考，实际可选模型由 API 实时返回。脚本会自动过滤过时版本，请从列表中选择最新可用模型。
 
@@ -101,9 +100,11 @@ model_provider = "copilot-proxy"
 
 [model_providers.copilot-proxy]
 name = "Copilot API Proxy"
-base_url = "http://localhost:4141/v1"
-env_key = "OPENAI_API_KEY"
+base_url = "http://127.0.0.1:4141/v1"
+supports_websockets = false
 ```
+
+> 代理不需要 API Key 认证，不设 `env_key` 即可跳过 Codex 登录流程。
 
 > **建议**：使用 Codex 通过 GitHub Copilot 时，建议在 `~/.codex/config.toml` 中禁用 multi-agent 以优化计费：
 > ```toml
