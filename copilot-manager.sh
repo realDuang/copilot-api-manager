@@ -856,6 +856,10 @@ remove_environment_variables() {
         fi
     fi
     
+    # Clean up deprecated OPENAI_BASE_URL (replaced by config.toml)
+    remove_env_from_shell_config "OPENAI_BASE_URL"
+    unset OPENAI_BASE_URL 2>/dev/null
+    
     # Clean up Codex CLI config.toml
     remove_codex_config
     
