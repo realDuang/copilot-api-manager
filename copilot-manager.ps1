@@ -633,7 +633,7 @@ function Set-CodexConfig {
 $($script:CodexMarkerBegin)
 [model_providers.copilot-proxy]
 name = "Copilot API Proxy"
-base_url = "$script:ServiceUrl/v1"
+base_url = "http://127.0.0.1:$($script:Port)/v1"
 env_key = "OPENAI_API_KEY"
 supports_websockets = false
 $($script:CodexMarkerEnd)
@@ -681,6 +681,162 @@ function Remove-CodexConfig {
     }
 }
 
+$script:ClaudeSettingsFile = Join-Path $env:USERPROFILE ".claude\settings.json"
+
+# List of env keys managed by this tool in ~/.claude/settings.json
+$script:ManagedEnvKeys = @(
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+    "DISABLE_TELEMETRY",
+    "OPENAI_API_KEY"
+)
+
+function Write-ClaudeSettingsJson {
+    # Merge key-value pairs into ~/.claude/settings.json under the "env" key.
+    # Usage: Write-ClaudeSettingsJson @{ "KEY1" = "VAL1"; "KEY2" = "VAL2" }
+    param([hashtable]$EnvVars)
+
+    $settingsDir = Join-Path $env:USERPROFILE ".claude"
+    $settingsPath = $script:ClaudeSettingsFile
+
+    # Ensure directory exists
+    if (-not (Test-Path $settingsDir)) {
+        New-Item -ItemType Directory -Path $settingsDir -Force | Out-Null
+    }
+
+    # Read existing settings
+    $settings = @{}
+    if (Test-Path $settingsPath) {
+        try {
+            $content = Get-Content $settingsPath -Raw -ErrorAction Stop
+            if ($content) {
+                $settings = $content | ConvertFrom-Json -ErrorAction Stop
+                # Convert PSCustomObject to hashtable for easier manipulation
+                $settingsHt = @{}
+                $settings.PSObject.Properties | ForEach-Object { $settingsHt[$_.Name] = $_.Value }
+                $settings = $settingsHt
+            }
+        }
+        catch {
+            $settings = @{}
+        }
+    }
+
+    # Get existing env as hashtable
+    $env_ht = @{}
+    if ($settings.ContainsKey("env") -and $null -ne $settings["env"]) {
+        $envObj = $settings["env"]
+        if ($envObj -is [System.Collections.Hashtable]) {
+            $env_ht = $envObj
+        }
+        else {
+            $envObj.PSObject.Properties | ForEach-Object { $env_ht[$_.Name] = $_.Value }
+        }
+    }
+
+    # Merge new env vars
+    foreach ($key in $EnvVars.Keys) {
+        $env_ht[$key] = $EnvVars[$key]
+    }
+    $settings["env"] = $env_ht
+
+    # Convert back to ordered structure for clean JSON output
+    $outputObj = [ordered]@{}
+    foreach ($key in ($settings.Keys | Sort-Object)) {
+        if ($key -eq "env") {
+            $orderedEnv = [ordered]@{}
+            foreach ($ek in ($env_ht.Keys | Sort-Object)) {
+                $orderedEnv[$ek] = $env_ht[$ek]
+            }
+            $outputObj["env"] = $orderedEnv
+        }
+        else {
+            $outputObj[$key] = $settings[$key]
+        }
+    }
+
+    # Write back with pretty formatting
+    $json = $outputObj | ConvertTo-Json -Depth 10
+    Set-Content -Path $settingsPath -Value $json -Encoding UTF8 -NoNewline
+    # Add trailing newline
+    Add-Content -Path $settingsPath -Value "" -NoNewline:$false
+}
+
+function Remove-ClaudeSettingsEnv {
+    # Remove specified env keys from ~/.claude/settings.json
+    # Usage: Remove-ClaudeSettingsEnv @("KEY1", "KEY2")
+    param([string[]]$Keys)
+
+    $settingsPath = $script:ClaudeSettingsFile
+
+    if (-not (Test-Path $settingsPath)) {
+        return
+    }
+
+    try {
+        $content = Get-Content $settingsPath -Raw -ErrorAction Stop
+        if (-not $content) { return }
+        $settings = $content | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        return
+    }
+
+    $envObj = $settings.env
+    if ($null -eq $envObj) { return }
+
+    # Convert to hashtable
+    $env_ht = @{}
+    $envObj.PSObject.Properties | ForEach-Object { $env_ht[$_.Name] = $_.Value }
+
+    # Remove keys
+    foreach ($key in $Keys) {
+        $env_ht.Remove($key)
+    }
+
+    # Rebuild settings with updated env
+    $settingsHt = [ordered]@{}
+    $settings.PSObject.Properties | ForEach-Object {
+        if ($_.Name -eq "env") {
+            $orderedEnv = [ordered]@{}
+            foreach ($ek in ($env_ht.Keys | Sort-Object)) {
+                $orderedEnv[$ek] = $env_ht[$ek]
+            }
+            $settingsHt["env"] = $orderedEnv
+        }
+        else {
+            $settingsHt[$_.Name] = $_.Value
+        }
+    }
+
+    $json = $settingsHt | ConvertTo-Json -Depth 10
+    Set-Content -Path $settingsPath -Value $json -Encoding UTF8 -NoNewline
+    Add-Content -Path $settingsPath -Value "" -NoNewline:$false
+}
+
+function Remove-LegacyRegistryEnvVars {
+    # Clean up legacy environment variables from Windows registry
+    param([string[]]$VarNames)
+
+    $regPath = "HKCU:\Environment"
+    foreach ($var in $VarNames) {
+        try {
+            $existing = Get-ItemProperty -Path $regPath -Name $var -ErrorAction SilentlyContinue
+            if ($null -ne $existing) {
+                Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
+                [Environment]::SetEnvironmentVariable($var, $null, "User")
+            }
+        }
+        catch {}
+    }
+}
+
 function Set-EnvironmentVariables {
     param(
         [string]$OpusModel,
@@ -689,7 +845,7 @@ function Set-EnvironmentVariables {
     )
 
     Write-Host ""
-    Write-Host "将设置以下环境变量（用户级）：" -ForegroundColor White
+    Write-Host "将设置以下环境变量：" -ForegroundColor White
     Write-Host ""
     Write-Host "  ANTHROPIC_BASE_URL = $script:ServiceUrl"
     Write-Host "  ANTHROPIC_AUTH_TOKEN = dummy"
@@ -701,7 +857,8 @@ function Set-EnvironmentVariables {
     Write-Host "  CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = false"
     Write-Host "  DISABLE_TELEMETRY = 1"
     Write-Host ""
-    Write-Host "配置后，所有工作目录的 Claude Code 都将使用 Copilot API" -ForegroundColor Yellow
+    Write-Host "配置后，所有 Claude Code 会话将使用 Copilot API" -ForegroundColor Yellow
+    Write-Host "配置文件: ~/.claude/settings.json" -ForegroundColor Yellow
     Write-Host ""
 
     $codexConfirm = Read-Host "是否同时配置 Codex CLI? (Y/N)"
@@ -709,12 +866,12 @@ function Set-EnvironmentVariables {
     if ($configCodex) {
         Write-Host ""
         Write-Host "  [Codex CLI]" -ForegroundColor Yellow
-        Write-Host "  OPENAI_API_KEY = dummy (env)"
+        Write-Host "  OPENAI_API_KEY = dummy"
         Write-Host "  ~/.codex/config.toml -> copilot-proxy provider"
     }
     Write-Host ""
 
-    $confirm = Read-Host "确认设置全局环境变量? (Y/N)"
+    $confirm = Read-Host "确认设置环境变量? (Y/N)"
     if ($confirm -ne 'Y' -and $confirm -ne 'y') {
         Write-Warning "操作已取消"
         return $false
@@ -724,43 +881,51 @@ function Set-EnvironmentVariables {
     Write-Host "[开始设置环境变量]" -ForegroundColor Cyan
 
     try {
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", $script:ServiceUrl, "User")
+        # Build env vars hashtable for settings.json
+        $envVars = @{
+            "ANTHROPIC_BASE_URL" = $script:ServiceUrl
+            "ANTHROPIC_AUTH_TOKEN" = "dummy"
+            "ANTHROPIC_DEFAULT_OPUS_MODEL" = $OpusModel
+            "ANTHROPIC_DEFAULT_SONNET_MODEL" = $SonnetModel
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL" = $HaikuModel
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" = "1"
+            "CLAUDE_CODE_ATTRIBUTION_HEADER" = "0"
+            "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" = "false"
+            "DISABLE_TELEMETRY" = "1"
+        }
+
+        if ($configCodex) {
+            $envVars["OPENAI_API_KEY"] = "dummy"
+        }
+
+        # Write all env vars to ~/.claude/settings.json
+        Write-ClaudeSettingsJson -EnvVars $envVars
+
         Write-Success "ANTHROPIC_BASE_URL"
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "dummy", "User")
         Write-Success "ANTHROPIC_AUTH_TOKEN"
-
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_OPUS_MODEL", $OpusModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_OPUS_MODEL"
-
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_SONNET_MODEL", $SonnetModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_SONNET_MODEL"
-
-        [Environment]::SetEnvironmentVariable("ANTHROPIC_DEFAULT_HAIKU_MODEL", $HaikuModel, "User")
         Write-Success "ANTHROPIC_DEFAULT_HAIKU_MODEL"
-
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1", "User")
         Write-Success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ATTRIBUTION_HEADER", "0", "User")
         Write-Success "CLAUDE_CODE_ATTRIBUTION_HEADER"
-
-        [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "false", "User")
         Write-Success "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
-
-        [Environment]::SetEnvironmentVariable("DISABLE_TELEMETRY", "1", "User")
         Write-Success "DISABLE_TELEMETRY"
+
+        # Clean up legacy env vars from Windows registry
+        Remove-LegacyRegistryEnvVars -VarNames $script:ManagedEnvKeys
+        # Also clean deprecated vars
+        Remove-LegacyRegistryEnvVars -VarNames @("OPENAI_BASE_URL", "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
 
         if ($configCodex) {
             Write-Host ""
             Write-Host "[设置 Codex CLI 配置]" -ForegroundColor Cyan
-            [Environment]::SetEnvironmentVariable("OPENAI_API_KEY", "dummy", "User")
-            Write-Success "OPENAI_API_KEY (env)"
+            Write-Success "OPENAI_API_KEY"
             Set-CodexConfig
         }
 
         Write-Host ""
         Write-Title "✓ 环境变量设置完成！"
-        
+
         # Auto-restart service if running, so new env vars take effect
         if (Test-PortInUse -Port $script:Port) {
             Write-Host ""
@@ -779,12 +944,11 @@ function Set-EnvironmentVariables {
                 Write-Error "服务重启失败，请手动重启（选项 1）"
             }
         }
-        
+
         Write-Host ""
         Write-Host "重要提示：" -ForegroundColor Yellow
-        Write-Host "  1. 需要重启所有已打开的命令行窗口"
-        Write-Host "  2. 需要重启 IDE/编辑器（如 VS Code）"
-        Write-Host "  3. 重启后，所有工作目录都会使用 Copilot API"
+        Write-Host "  1. 重启 Claude Code 以应用新配置"
+        Write-Host "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
         Write-Host ""
 
         return $true
@@ -797,7 +961,7 @@ function Set-EnvironmentVariables {
 
 function Remove-EnvironmentVariables {
     Clear-HostSafe
-    Write-Title "清除全局环境变量"
+    Write-Title "清除环境变量"
 
     Write-Host "此操作将删除以下环境变量：" -ForegroundColor White
     Write-Host ""
@@ -819,7 +983,7 @@ function Remove-EnvironmentVariables {
     Write-Host "清除后，Claude Code / Codex CLI 将恢复使用官方 API" -ForegroundColor Yellow
     Write-Host ""
 
-    $confirm = Read-Host "确认清除全局环境变量? (Y/N)"
+    $confirm = Read-Host "确认清除环境变量? (Y/N)"
     if ($confirm -ne 'Y' -and $confirm -ne 'y') {
         Write-Warning "操作已取消"
         return
@@ -828,53 +992,36 @@ function Remove-EnvironmentVariables {
     Write-Host ""
     Write-Host "[开始清除环境变量]" -ForegroundColor Cyan
 
-    $variables = @(
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "CLAUDE_CODE_ATTRIBUTION_HEADER",
-        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
-        "DISABLE_TELEMETRY",
-        "OPENAI_API_KEY"
-    )
+    # Remove managed keys from ~/.claude/settings.json
+    Remove-ClaudeSettingsEnv -Keys $script:ManagedEnvKeys
 
-    # Use registry to completely remove environment variables (key + value)
+    foreach ($var in $script:ManagedEnvKeys) {
+        Write-Success "$var 已删除"
+    }
+
+    # Clean up legacy env vars from Windows registry (backward compat)
     $regPath = "HKCU:\Environment"
+    Remove-LegacyRegistryEnvVars -VarNames $script:ManagedEnvKeys
 
-    foreach ($var in $variables) {
-        try {
-            # Check if variable exists in registry
-            $existingValue = Get-ItemProperty -Path $regPath -Name $var -ErrorAction SilentlyContinue
-            if ($null -ne $existingValue) {
-                # Remove from registry (completely deletes key)
-                Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
-                # Also clear from .NET cache
-                [Environment]::SetEnvironmentVariable($var, $null, "User")
-                Write-Success "$var 已删除"
+    # Also clean up any deprecated/unknown ANTHROPIC_ variables from registry
+    try {
+        $allUserVars = Get-Item -Path $regPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Property
+        if ($allUserVars) {
+            $deprecatedVars = $allUserVars | Where-Object { $_ -match "^ANTHROPIC_" -and $_ -notin $script:ManagedEnvKeys }
+            foreach ($var in $deprecatedVars) {
+                try {
+                    Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
+                    [Environment]::SetEnvironmentVariable($var, $null, "User")
+                    Write-Warning "$var (已弃用) 已删除"
+                }
+                catch {}
             }
-            else {
-                Write-Info "$var 不存在，跳过"
-            }
-        }
-        catch {
-            Write-Warning "$var 删除失败: $_"
         }
     }
+    catch {}
 
-    # Also clean up any deprecated/unknown ANTHROPIC_ variables
-    $allUserVars = Get-Item -Path $regPath | Select-Object -ExpandProperty Property
-    $deprecatedVars = $allUserVars | Where-Object { $_ -match "^ANTHROPIC_" -and $_ -notin $variables }
-    foreach ($var in $deprecatedVars) {
-        try {
-            Remove-ItemProperty -Path $regPath -Name $var -ErrorAction Stop
-            [Environment]::SetEnvironmentVariable($var, $null, "User")
-            Write-Warning "$var (已弃用) 已删除"
-        }
-        catch {}
-    }
+    # Clean up deprecated vars from registry
+    Remove-LegacyRegistryEnvVars -VarNames @("OPENAI_BASE_URL", "DISABLE_NON_ESSENTIAL_MODEL_CALLS")
 
     # Broadcast environment change to notify other applications
     if (-not ("Win32.NativeMethods" -as [type])) {
@@ -896,8 +1043,8 @@ public static extern IntPtr SendMessageTimeout(
     Write-Host ""
     Write-Title "✓ 环境变量清除完成！"
     Write-Host "重要提示：" -ForegroundColor Yellow
-    Write-Host "  1. 需要重启所有已打开的命令行窗口"
-    Write-Host "  2. 需要重启 IDE/编辑器（如 VS Code）"
+    Write-Host "  1. 重启 Claude Code 以应用更改"
+    Write-Host "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
     Write-Host "  3. 重启后将使用 Anthropic 官方 API"
     Write-Host ""
 }

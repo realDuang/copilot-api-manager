@@ -602,6 +602,118 @@ remove_env_from_shell_config() {
     fi
 }
 
+CLAUDE_SETTINGS_FILE="$HOME/.claude/settings.json"
+
+# List of env keys managed by this tool in ~/.claude/settings.json
+MANAGED_ENV_KEYS=(
+    "ANTHROPIC_BASE_URL"
+    "ANTHROPIC_AUTH_TOKEN"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL"
+    "ANTHROPIC_DEFAULT_SONNET_MODEL"
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+    "CLAUDE_CODE_ATTRIBUTION_HEADER"
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
+    "DISABLE_TELEMETRY"
+    "OPENAI_API_KEY"
+)
+
+write_claude_settings_json() {
+    # Merge key-value pairs into ~/.claude/settings.json under the "env" key.
+    # Usage: write_claude_settings_json KEY1 VAL1 KEY2 VAL2 ...
+    local args=("$@")
+    local json_fragment="{"
+    local first=true
+    local i=0
+    while [[ $i -lt ${#args[@]} ]]; do
+        local key="${args[$i]}"
+        local val="${args[$((i+1))]}"
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            json_fragment+=","
+        fi
+        json_fragment+="\"${key}\":\"${val}\""
+        i=$((i+2))
+    done
+    json_fragment+="}"
+
+    python3 -c "
+import json, os, sys
+
+settings_path = os.path.expanduser('~/.claude/settings.json')
+new_env = json.loads(sys.argv[1])
+
+# Ensure directory exists
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+
+# Read existing settings
+settings = {}
+if os.path.isfile(settings_path):
+    try:
+        with open(settings_path, 'r') as f:
+            settings = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        settings = {}
+
+# Merge into env key
+if 'env' not in settings or not isinstance(settings['env'], dict):
+    settings['env'] = {}
+settings['env'].update(new_env)
+
+# Write back with pretty formatting
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+" "$json_fragment"
+}
+
+remove_claude_settings_env() {
+    # Remove managed env keys from ~/.claude/settings.json
+    # Usage: remove_claude_settings_env KEY1 KEY2 ...
+    local keys=("$@")
+    local json_array="["
+    local first=true
+    for key in "${keys[@]}"; do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            json_array+=","
+        fi
+        json_array+="\"${key}\""
+    done
+    json_array+="]"
+
+    python3 -c "
+import json, os, sys
+
+settings_path = os.path.expanduser('~/.claude/settings.json')
+keys_to_remove = json.loads(sys.argv[1])
+
+if not os.path.isfile(settings_path):
+    sys.exit(0)
+
+try:
+    with open(settings_path, 'r') as f:
+        settings = json.load(f)
+except (json.JSONDecodeError, IOError):
+    sys.exit(0)
+
+env = settings.get('env', {})
+if not isinstance(env, dict):
+    sys.exit(0)
+
+for key in keys_to_remove:
+    env.pop(key, None)
+
+settings['env'] = env
+
+with open(settings_path, 'w') as f:
+    json.dump(settings, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+" "$json_array"
+}
+
 ask_codex_config() {
     echo ""
     echo "${YELLOW}是否同时配置 Codex CLI？${NC}"
@@ -625,12 +737,7 @@ set_codex_environment_variables() {
     echo ""
     echo "${CYAN}[设置 Codex CLI 配置]${NC}"
 
-    # 1. Set OPENAI_API_KEY env var (referenced by config.toml env_key)
-    add_env_to_shell_config "OPENAI_API_KEY" "dummy"
-    write_success "OPENAI_API_KEY (env)"
-    export OPENAI_API_KEY="dummy"
-
-    # 2. Create/update ~/.codex/config.toml
+    # Create/update ~/.codex/config.toml
     mkdir -p "${CODEX_CONFIG_DIR}"
 
     if [[ -f "${CODEX_CONFIG_FILE}" ]]; then
@@ -664,7 +771,7 @@ set_codex_environment_variables() {
 ${CODEX_PROVIDER_MARKER}
 [model_providers.copilot-proxy]
 name = "Copilot API Proxy"
-base_url = "${SERVICE_URL}/v1"
+base_url = "http://127.0.0.1:${PORT}/v1"
 env_key = "OPENAI_API_KEY"
 supports_websockets = false
 ${CODEX_PROVIDER_MARKER_END}
@@ -707,45 +814,62 @@ set_environment_variables() {
     echo "  DISABLE_TELEMETRY = 1"
     echo ""
     echo "${YELLOW}配置后，所有 Claude Code 会话将使用 Copilot API${NC}"
-    echo "${YELLOW}配置文件: ${SHELL_CONFIG}${NC}"
+    echo "${YELLOW}配置文件: ~/.claude/settings.json${NC}"
     echo ""
-    
+
     echo -n "确认设置环境变量？(Y/N): "
     read confirm
     if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
         write_warning "操作已取消"
         return 1
     fi
-    
+
     echo ""
     echo "${CYAN}[开始设置环境变量]${NC}"
-    
-    add_env_to_shell_config "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
+
+    # Build env vars list for settings.json
+    local env_args=(
+        "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
+        "ANTHROPIC_AUTH_TOKEN" "dummy"
+        "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
+        "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
+        "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
+        "DISABLE_TELEMETRY" "1"
+    )
+
+    # Codex CLI configuration
+    local config_codex=false
+    if ask_codex_config; then
+        config_codex=true
+        # Include OPENAI_API_KEY in settings.json so Claude Code spawns Codex with it
+        env_args+=("OPENAI_API_KEY" "dummy")
+    fi
+
+    # Write all env vars to ~/.claude/settings.json
+    write_claude_settings_json "${env_args[@]}"
+
     write_success "ANTHROPIC_BASE_URL"
-    add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"
     write_success "ANTHROPIC_AUTH_TOKEN"
-
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
     write_success "ANTHROPIC_DEFAULT_OPUS_MODEL"
-    
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
     write_success "ANTHROPIC_DEFAULT_SONNET_MODEL"
-    
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
     write_success "ANTHROPIC_DEFAULT_HAIKU_MODEL"
-    
-    add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
     write_success "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-
-    add_env_to_shell_config "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
     write_success "CLAUDE_CODE_ATTRIBUTION_HEADER"
-
-    add_env_to_shell_config "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
     write_success "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
-    
-    add_env_to_shell_config "DISABLE_TELEMETRY" "1"
     write_success "DISABLE_TELEMETRY"
-    
+
+    # Clean up legacy env vars from shell config if they exist
+    for key in "${MANAGED_ENV_KEYS[@]}"; do
+        remove_env_from_shell_config "$key"
+    done
+    # Also clean deprecated vars
+    remove_env_from_shell_config "OPENAI_BASE_URL"
+    remove_env_from_shell_config "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
+
+    # Export for current session
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
     export ANTHROPIC_AUTH_TOKEN="dummy"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
@@ -756,14 +880,15 @@ set_environment_variables() {
     export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
     export DISABLE_TELEMETRY="1"
 
-    # Codex CLI configuration
-    if ask_codex_config; then
+    if [[ "$config_codex" == "true" ]]; then
+        export OPENAI_API_KEY="dummy"
+        write_success "OPENAI_API_KEY"
         set_codex_environment_variables
     fi
-    
+
     echo ""
     write_title "✓ 环境变量设置完成！"
-    
+
     # Auto-restart service if it's running, so new env vars take effect
     if test_port_in_use ${PORT}; then
         echo ""
@@ -781,21 +906,20 @@ set_environment_variables() {
             write_error "服务重启失败，请手动重启（选项 1）"
         fi
     fi
-    
+
     echo ""
     echo "${YELLOW}重要提示：${NC}"
-    echo "  1. 运行 'source ${SHELL_CONFIG}' 以应用到当前终端"
-    echo "  2. 新终端窗口将自动拥有这些变量"
-    echo "  3. 重启 IDE/编辑器（如 VS Code）使更改生效"
+    echo "  1. 重启 Claude Code 以应用新配置"
+    echo "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
     echo ""
-    
+
     return 0
 }
 
 remove_environment_variables() {
     clear
     write_title "清除环境变量"
-    
+
     echo "${WHITE}此操作将删除以下环境变量：${NC}"
     echo ""
     echo "  ${YELLOW}[Claude Code]${NC}"
@@ -815,37 +939,31 @@ remove_environment_variables() {
     echo ""
     echo "${YELLOW}清除后，Claude Code / Codex CLI 将恢复使用官方 API${NC}"
     echo ""
-    
+
     echo -n "确认清除环境变量？(Y/N): "
     read confirm
     if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
         write_warning "操作已取消"
         return
     fi
-    
+
     echo ""
     echo "${CYAN}[开始清除环境变量]${NC}"
-    
-    local variables=(
-        "ANTHROPIC_BASE_URL"
-        "ANTHROPIC_DEFAULT_SONNET_MODEL"
-        "ANTHROPIC_DEFAULT_OPUS_MODEL"
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL"
-        "ANTHROPIC_AUTH_TOKEN"
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-        "CLAUDE_CODE_ATTRIBUTION_HEADER"
-        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"
-        "DISABLE_TELEMETRY"
-        "OPENAI_API_KEY"
-    )
-    
-    for var in "${variables[@]}"; do
-        remove_env_from_shell_config "$var"
+
+    # Remove managed keys from ~/.claude/settings.json
+    remove_claude_settings_env "${MANAGED_ENV_KEYS[@]}"
+
+    for var in "${MANAGED_ENV_KEYS[@]}"; do
         unset "$var"
         write_success "${var} 已删除"
     done
-    
-    # Also clean up any deprecated/unknown ANTHROPIC_ variables
+
+    # Clean up legacy env vars from shell config (backward compat)
+    for var in "${MANAGED_ENV_KEYS[@]}"; do
+        remove_env_from_shell_config "$var"
+    done
+
+    # Also clean up any deprecated/unknown ANTHROPIC_ variables from shell config
     if [[ -f "$SHELL_CONFIG" ]]; then
         local deprecated_vars=$(grep "^export ANTHROPIC_" "$SHELL_CONFIG" 2>/dev/null | sed 's/^export \([^=]*\)=.*/\1/')
         if [[ -n "$deprecated_vars" ]]; then
@@ -856,18 +974,18 @@ remove_environment_variables() {
             done <<< "$deprecated_vars"
         fi
     fi
-    
+
     # Clean up deprecated OPENAI_BASE_URL (replaced by config.toml)
     remove_env_from_shell_config "OPENAI_BASE_URL"
     unset OPENAI_BASE_URL 2>/dev/null
-    
+
     # Clean up Codex CLI config.toml
     remove_codex_config
-    
+
     echo ""
     write_title "✓ 环境变量清除完成！"
     echo "${YELLOW}重要提示：${NC}"
-    echo "  1. 运行 'source ${SHELL_CONFIG}' 以应用到当前终端"
+    echo "  1. 重启 Claude Code 以应用更改"
     echo "  2. 重启 IDE/编辑器（如 VS Code）使更改生效"
     echo "  3. 重启后将使用 Anthropic 官方 API"
     echo ""
@@ -1062,35 +1180,36 @@ show_service_status() {
     fi
     
     echo ""
-    echo "${CYAN}[检查环境变量]${NC}"
-    
-    if [[ -f "$SHELL_CONFIG" ]]; then
-        local found_any=false
-        while IFS= read -r line; do
-            # Extract variable name and value from "export VAR_NAME="value""
-            local var_name=$(echo "$line" | sed 's/^export \([^=]*\)=.*/\1/')
-            local var_value=$(echo "$line" | cut -d'"' -f2)
-            if [[ -n "$var_name" && -n "$var_value" ]]; then
-                found_any=true
-                echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
-            fi
-        done < <(grep "^export ANTHROPIC_\|^export CLAUDE_CODE_\|^export DISABLE_TELEMETRY=" "$SHELL_CONFIG")
+    echo "${CYAN}[检查环境变量 (settings.json)]${NC}"
 
-        # Codex CLI env vars
-        while IFS= read -r line; do
-            local var_name=$(echo "$line" | sed 's/^export \([^=]*\)=.*/\1/')
-            local var_value=$(echo "$line" | cut -d'"' -f2)
-            if [[ -n "$var_name" && -n "$var_value" ]]; then
-                found_any=true
-                echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
-            fi
-        done < <(grep "^export OPENAI_API_KEY=" "$SHELL_CONFIG")
-        
-        if [[ "$found_any" == "false" ]]; then
+    if [[ -f "$CLAUDE_SETTINGS_FILE" ]]; then
+        local env_output
+        env_output=$(python3 -c "
+import json, sys, os
+path = os.path.expanduser('~/.claude/settings.json')
+try:
+    with open(path, 'r') as f:
+        settings = json.load(f)
+    env = settings.get('env', {})
+    if not isinstance(env, dict) or not env:
+        print('EMPTY')
+    else:
+        for k, v in sorted(env.items()):
+            print(f'{k}={v}')
+except:
+    print('ERROR')
+" 2>/dev/null)
+        if [[ "$env_output" == "EMPTY" || "$env_output" == "ERROR" ]]; then
             echo "  ${RED}[×] 未配置任何环境变量${NC}"
+        else
+            while IFS='=' read -r var_name var_value; do
+                if [[ -n "$var_name" ]]; then
+                    echo "  ${var_name}: ${GREEN}[✓] ${var_value}${NC}"
+                fi
+            done <<< "$env_output"
         fi
     else
-        echo "  ${RED}[×] 配置文件未找到 (${SHELL_CONFIG})${NC}"
+        echo "  ${RED}[×] 配置文件未找到 (~/.claude/settings.json)${NC}"
     fi
     
     # Codex CLI config.toml status
@@ -1276,17 +1395,33 @@ invoke_quick_start() {
     # Step 3: Configure environment variables
     write_info "[步骤 3/3] 配置环境变量..."
     echo ""
-    
-    add_env_to_shell_config "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
-    add_env_to_shell_config "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
-    add_env_to_shell_config "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
-    add_env_to_shell_config "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
-    add_env_to_shell_config "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
-    add_env_to_shell_config "DISABLE_TELEMETRY" "1"
-    
+
+    # Build env vars list for settings.json
+    local env_args=(
+        "ANTHROPIC_BASE_URL" "${SERVICE_URL}"
+        "ANTHROPIC_AUTH_TOKEN" "dummy"
+        "ANTHROPIC_DEFAULT_OPUS_MODEL" "${opus_model}"
+        "ANTHROPIC_DEFAULT_SONNET_MODEL" "${sonnet_model}"
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL" "${haiku_model}"
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" "1"
+        "CLAUDE_CODE_ATTRIBUTION_HEADER" "0"
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "false"
+        "DISABLE_TELEMETRY" "1"
+    )
+
+    # Codex CLI configuration
+    local config_codex=false
+    if ask_codex_config; then
+        config_codex=true
+        env_args+=("OPENAI_API_KEY" "dummy")
+    fi
+
+    # Write all env vars to ~/.claude/settings.json
+    write_claude_settings_json "${env_args[@]}"
+
+    # Export for current session
     export ANTHROPIC_BASE_URL="${SERVICE_URL}"
+    export ANTHROPIC_AUTH_TOKEN="dummy"
     export ANTHROPIC_DEFAULT_OPUS_MODEL="${opus_model}"
     export ANTHROPIC_DEFAULT_SONNET_MODEL="${sonnet_model}"
     export ANTHROPIC_DEFAULT_HAIKU_MODEL="${haiku_model}"
@@ -1294,18 +1429,19 @@ invoke_quick_start() {
     export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
     export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION="false"
     export DISABLE_TELEMETRY="1"
-    
-    add_env_to_shell_config "ANTHROPIC_AUTH_TOKEN" "dummy"
-    export ANTHROPIC_AUTH_TOKEN="dummy"
-    
-    # Remove deprecated vars if they exist
+
+    # Clean up legacy env vars from shell config
+    for key in "${MANAGED_ENV_KEYS[@]}"; do
+        remove_env_from_shell_config "$key"
+    done
     remove_env_from_shell_config "DISABLE_NON_ESSENTIAL_MODEL_CALLS"
+    remove_env_from_shell_config "OPENAI_BASE_URL"
     unset DISABLE_NON_ESSENTIAL_MODEL_CALLS 2>/dev/null
-    
+
     write_success "环境变量配置完成"
 
-    # Codex CLI configuration
-    if ask_codex_config; then
+    if [[ "$config_codex" == "true" ]]; then
+        export OPENAI_API_KEY="dummy"
         set_codex_environment_variables
     fi
     
@@ -1339,8 +1475,7 @@ invoke_quick_start() {
     echo "  ${CYAN}Dashboard: https://ericc-ch.github.io/copilot-api?endpoint=${SERVICE_URL}/usage${NC}"
     echo ""
     echo "${YELLOW}重要提示：${NC}"
-    echo "  - 运行 'source ${SHELL_CONFIG}' 或重启终端使环境变量生效"
-    echo "  - 重启 IDE/编辑器使更改生效"
+    echo "  - 重启 Claude Code 或 IDE/编辑器使配置生效"
     echo "  - 服务和守护进程在后台运行，关闭此窗口不影响运行"
     echo ""
 }
@@ -1464,7 +1599,6 @@ show_main_menu() {
         write_title "GitHub Copilot API 管理工具"
         
         echo "  工作目录: ${WORK_DIR}"
-        echo "  Shell 配置: ${SHELL_CONFIG}"
         echo ""
         echo "  ${YELLOW}[服务管理]${NC}"
         echo "  ${GREEN}1. 启动服务 (含守护进程)${NC}"
