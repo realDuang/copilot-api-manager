@@ -635,6 +635,7 @@ $($script:CodexMarkerBegin)
 name = "Copilot API Proxy"
 base_url = "$script:ServiceUrl/v1"
 env_key = "OPENAI_API_KEY"
+supports_websockets = false
 $($script:CodexMarkerEnd)
 "@
 

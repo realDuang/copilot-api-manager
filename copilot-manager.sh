@@ -666,6 +666,7 @@ ${CODEX_PROVIDER_MARKER}
 name = "Copilot API Proxy"
 base_url = "${SERVICE_URL}/v1"
 env_key = "OPENAI_API_KEY"
+supports_websockets = false
 ${CODEX_PROVIDER_MARKER_END}
 EOF
 
